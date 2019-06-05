@@ -16,8 +16,8 @@ pub struct Pool<T, F = fn() -> T> {
     new: F,
 }
 
-pub type Owned<'a, T> = Key<'a, T, RwLockWriteGuard<'a, T>>;
-pub type Shared<'a, T> = Key<'a, T, RwLockReadGuard<'a, T>>;
+pub type Owned<'a, T> = Key<'a, T, RwLockWriteGuard<'a, slab::Slot<T>>>;
+pub type Shared<'a, T> = Key<'a, T, RwLockReadGuard<'a, slab::Slot<T>>>;
 
 pub struct Key<'a, T, L>
 where

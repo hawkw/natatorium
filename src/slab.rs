@@ -6,13 +6,13 @@ use ::traits::Clear;
 
 #[derive(Debug)]
 pub struct Slab<T> {
-    inner: Vec<Slot<T>>,
+    inner: Vec<RwLock<Slot<T>>>,
     head: AtomicUsize,
 }
 
 #[derive(Debug)]
 pub struct Slot<T> {
-    item: RwLock<T>,
+    item: T,
     idx: usize,
     ref_count: AtomicUsize,
     next: AtomicUsize,
@@ -54,9 +54,13 @@ impl<T> Slab<T> {
         F: FnMut() -> T,
     {
         let next = self.inner.len();
+
+        // Avoid multiple allocations.
+        self.inner.reserve(cap);
         for i in next..self.inner.len() {
-            self.inner.push(Slot::new(new(), i));
+            self.inner.push(RwLock::new(Slot::new(new(), i)));
         }
+
         self.head.store(next)
     }
 }
@@ -65,7 +69,7 @@ impl<T> Slab<T>
 where
     T: Clear,
 {
-    pub fn try_checkout<'a>(&'a self) -> Result<RwLockWriteGuard<'a, T>, Error> {
+    pub fn try_checkout<'a>(&'a self) -> Result<RwLockWriteGuard<'a, Slot<T>>, Error> {
         // The slab's free list is a modification of Treiber's lock-free stack,
         // using slab indices instead of pointers, and with a provison for
         // growing the slab when needed.
@@ -79,17 +83,18 @@ where
             return Err(Error::AtCapacity);
         }
 
-        let slot = &self.inner[idx];
         // If someone else has locked the slot, bail and try again.
-        let mut lock = slot.item.try_write().ok_or(Error::ShouldRetry)?;
+        let mut slot = &self.inner[idx].try_write().ok_or(Error::ShouldRetry)?;
         let next = slot.next.load(Ordering::Relaxed);
 
         // Is our snapshot still valid?
         if self.head.compare_and_swap(idx, next, Ordering::Release) == idx {
             // We can use this slot!
-            lock.clear();
-            Ok(lock)
+            slot.clear();
+            Ok(slot)
         } else {
+            // Since we're not checking out this slot, leave it on the free list.
+            slot.next = Some(next);
             Err(Error::ShouldRetry)
         }
     }
@@ -100,7 +105,7 @@ where
 impl<T> Slot<T> {
     pub fn new(item: T, idx: usize) -> Self {
         Slot {
-            item: RwLock::new(item),
+            item,
             ref_count: AtomicUsize::new(0),
             next: AtomicUsize::new(idx + 1),
             idx,
@@ -109,6 +114,7 @@ impl<T> Slot<T> {
 
     pub(crate) fn drop_ref(&self, head: &AtomicUsize) {
         if self.ref_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            // We are freeing the slot, synchronize here.
             atomic::fence(Ordering::Acquire);
 
             let next = head.swap(self.idx, Ordering::Release);
