@@ -1,9 +1,8 @@
 use std::sync::atomic::{self, AtomicUsize, Ordering};
 
-use owning_ref::OwningHandle;
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use ::traits::Clear;
 
+use crate::traits::Clear;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[derive(Debug)]
 pub struct Slab<T> {
     inner: Vec<RwLock<Slot<T>>>,
@@ -37,31 +36,39 @@ impl<T> Slab<T> {
     where
         T: Default,
     {
-        Self::new_from_fn(cap, T::default)
+        Self::new_from_fn(cap, &T::default)
     }
 
-    pub fn new_from_fn<F>(cap: usize, new: F) -> Self
+    pub fn new_from_fn<F>(cap: usize, new: &F) -> Self
     where
-        F: FnMut() -> T,
+        F: Fn() -> T,
     {
         let mut this = Self::new();
         this.grow_by(cap, new);
         this
     }
 
-    pub fn grow_by<F>(&mut self, cap: usize, new: F) -> usize
+    pub fn grow_by<F>(&mut self, cap: usize, new: &F)
     where
-        F: FnMut() -> T,
+        F: Fn() -> T,
     {
         let next = self.inner.len();
 
         // Avoid multiple allocations.
         self.inner.reserve(cap);
-        for i in next..self.inner.len() {
+        for i in next..next + cap {
             self.inner.push(RwLock::new(Slot::new(new(), i)));
         }
 
-        self.head.store(next)
+        self.head.store(next, Ordering::Release);
+    }
+
+    pub fn head<'a>(&'a self) -> &'a AtomicUsize {
+        &self.head
+    }
+
+    pub fn try_read<'a>(&'a self, index: usize) -> Option<RwLockReadGuard<'a, Slot<T>>> {
+        self.inner[index].try_read()
     }
 }
 
@@ -79,22 +86,26 @@ where
         let idx = self.head.load(Ordering::Acquire);
 
         // Can we insert without reallocating?
-        if idx > self.inner.len() {
+        let len = self.inner.len();
+
+        // println!("try_checkout head={:?}; len={:?}", idx, len);
+        if idx >= len {
             return Err(Error::AtCapacity);
         }
 
         // If someone else has locked the slot, bail and try again.
-        let mut slot = &self.inner[idx].try_write().ok_or(Error::ShouldRetry)?;
+        let mut slot = self.inner[idx].try_write().ok_or(Error::ShouldRetry)?;
         let next = slot.next.load(Ordering::Relaxed);
 
         // Is our snapshot still valid?
         if self.head.compare_and_swap(idx, next, Ordering::Release) == idx {
             // We can use this slot!
-            slot.clear();
+            let refs = slot.ref_count.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(refs == 0);
+
+            slot.item.clear();
             Ok(slot)
         } else {
-            // Since we're not checking out this slot, leave it on the free list.
-            slot.next = Some(next);
             Err(Error::ShouldRetry)
         }
     }
@@ -112,7 +123,7 @@ impl<T> Slot<T> {
         }
     }
 
-    pub(crate) fn drop_ref(&self, head: &AtomicUsize) {
+    pub fn drop_ref(&self, head: &AtomicUsize) {
         if self.ref_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             // We are freeing the slot, synchronize here.
             atomic::fence(Ordering::Acquire);
@@ -122,7 +133,22 @@ impl<T> Slot<T> {
         }
     }
 
-    pub(crate) fn clone_ref(&self) {
+    pub fn clone_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn index(&self) -> usize {
+        self.idx
+    }
+
+    #[inline]
+    pub fn item(&self) -> &T {
+        &self.item
+    }
+
+    #[inline]
+    pub fn item_mut(&mut self) -> &mut T {
+        &mut self.item
     }
 }
