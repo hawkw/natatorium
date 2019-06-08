@@ -16,12 +16,14 @@ pub struct Pool<T, N = fn() -> T> {
 }
 
 pub struct Owned<T, N = fn() -> T> {
-    slot: ptr::NonNull<slab::Slot<T>>,
+    item: ptr::NonNull<T>,
+    idx: usize,
     slab: Arc<RwLock<Inner<T, N>>>,
 }
 
 pub struct Shared<T, N = fn() -> T> {
-    slot: ptr::NonNull<slab::Slot<T>>,
+    item: ptr::NonNull<T>,
+    idx: usize,
     slab: Arc<RwLock<Inner<T, N>>>,
 }
 
@@ -38,7 +40,7 @@ pub(crate) enum Growth {
 }
 
 struct Inner<T, N> {
-    slab: Slab<T>,
+    slab: Slab<Box<T>>,
     new: N,
     settings: Settings,
 }
@@ -102,14 +104,18 @@ where
     }
 
     fn try_checkout2(&self) -> Result<Owned<T, N>, slab::Error> {
-        let slot = self
+        let mut slot = self
             .inner
             .read()
             .expect("pool poisoned")
             .slab
             .try_checkout()?;
+        let slot = unsafe { slot.as_mut() };
+        let idx = slot.index();
+        let item = slot.as_ptr();
         Ok(Owned {
-            slot,
+            idx,
+            item,
             slab: self.inner.clone(),
         })
     }
@@ -164,7 +170,7 @@ impl<T, N> Deref for Owned<T, N> {
         unsafe {
             // An `Owned` checkout requires that we have unique access to this
             // slot.
-            self.slot.as_ref().item()
+            self.item.as_ref()
         }
     }
 }
@@ -177,18 +183,17 @@ impl<T, N> DerefMut for Owned<T, N> {
             // An `Owned` checkout requires that we have unique access to this
             // slot, and an `&mut Owned` ensures the slot cannot be mutably
             // dereferenced with a shared ref to the owned checkout.
-            self.slot.as_mut().item_mut()
+            self.item.as_mut()
         }
     }
 }
 
 impl<T, N> Drop for Owned<T, N> {
     fn drop(&mut self) {
-        let slot = unsafe { self.slot.as_ref() };
         // if the pool is poisoned, it'll be destroyed anyway, so don't
         // double panic!
         if let Ok(inner) = self.slab.read() {
-            slot.drop_ref(&inner.slab);
+            inner.slab.slot(self.idx).drop_ref(&inner.slab);
         }
     }
 }
@@ -199,7 +204,7 @@ impl<T, N> Owned<T, N> {
         // for the slot's ref count, and one for the Arc), but we can't move out
         // of `self` since `Owned` implements `Drop`. This may not be a big deal
         // but it would be nice to fix.
-        Shared::new(&self.slot, &self.slab)
+        Shared::new(&self.item, self.idx, &self.slab)
     }
 
     pub fn detach(&mut self) -> T
@@ -208,7 +213,7 @@ impl<T, N> Owned<T, N> {
     {
         let mut lock = self.slab.write().expect("pool poisoned");
         let new = &mut lock.new;
-        let slot = unsafe { self.slot.as_mut() }.item_mut();
+        let slot = unsafe { self.item.as_mut() };
         mem::replace(slot, new())
     }
 
@@ -217,13 +222,12 @@ impl<T, N> Owned<T, N> {
 // === impl Shared ===
 
 impl<T, N> Shared<T, N> {
-    fn new(slot: &ptr::NonNull<slab::Slot<T>>, slab: &Arc<RwLock<Inner<T, N>>>) -> Self {
-        unsafe {
-            slot.as_ref().clone_ref();
-        }
+    fn new(item: &ptr::NonNull<T>, idx: usize, slab: &Arc<RwLock<Inner<T, N>>>) -> Self {
+        slab.read().expect("pool poisoned").slab.slot(idx).clone_ref();
         Self {
-            slot: slot.clone(),
+            item: item.clone(),
             slab: slab.clone(),
+            idx,
         }
     }
 
@@ -234,7 +238,7 @@ impl<T, N> Shared<T, N> {
 
 impl<T, N> Clone for Shared<T, N> {
     fn clone(&self) -> Self {
-        Self::new(&self.slot, &self.slab)
+        Self::new(&self.item, self.idx, &self.slab)
     }
 }
 
@@ -245,18 +249,17 @@ impl<T, N> Deref for Shared<T, N> {
     fn deref(&self) -> &Self::Target {
         unsafe {
             // A `Shared` checkout implies that the slot may not be mutated.
-            self.slot.as_ref().item()
+            self.item.as_ref()
         }
     }
 }
 
 impl<T, N> Drop for Shared<T, N> {
     fn drop(&mut self) {
-        let slot = unsafe { self.slot.as_ref() };
         // if the pool is poisoned, it'll be destroyed anyway, so don't
         // double panic!
         if let Ok(inner) = self.slab.read() {
-            slot.drop_ref(&inner.slab);
+            inner.slab.slot(self.idx).drop_ref(&inner.slab);
         }
     }
 }
@@ -301,7 +304,8 @@ where
             Growth::Double => self.slab.size(),
             Growth::Half => self.slab.size() / 2,
         };
-        self.slab.grow_by(amt, &mut self.new);
+        let new = &mut self.new;
+        self.slab.grow_by(amt, &mut || { Box::new((new)()) });
     }
 }
 

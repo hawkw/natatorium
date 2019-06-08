@@ -1,4 +1,4 @@
-use std::{collections, hash};
+use std::{collections, hash, ops::DerefMut};
 
 pub trait Clear {
     /// Clear all data in `self`, retaining the allocated capacithy.
@@ -24,6 +24,16 @@ pub trait WithCapacity: HasCapacity {
 }
 
 // ===== impl Clear =====
+
+impl<T> Clear for Box<T>
+where
+    T: Clear,
+{
+    #[inline]
+    fn clear(&mut self) {
+        self.deref_mut().clear()
+    }
+}
 
 impl<T> Clear for Vec<T> {
     #[inline]

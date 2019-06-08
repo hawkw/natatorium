@@ -112,7 +112,6 @@ fn checkout_does_not_grow_if_free_capacity_remains() {
 
     let c2 = pool.checkout();
     assert!(pool.size() > 1);
-    assert_ne!(pool.used(), 1);
-    assert_ne!(pool.remaining(), 0);
+    assert_ne!(pool.used(), 1);;
 
 }

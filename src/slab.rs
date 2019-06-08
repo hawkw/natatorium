@@ -1,6 +1,7 @@
 use std::{
     ptr,
     sync::atomic::{AtomicUsize, Ordering},
+    ops::DerefMut,
 };
 
 use crate::traits::Clear;
@@ -64,6 +65,10 @@ impl<T> Slab<T> {
 
     pub fn remaining(&self) -> usize {
         self.size() - self.used()
+    }
+
+    pub fn slot(&self, idx: usize) -> &Slot<T> {
+        &self.inner[idx]
     }
 }
 
@@ -148,6 +153,11 @@ impl<T> Slot<T> {
     }
 
     #[inline]
+    pub fn index(&self) -> usize {
+        self.idx
+    }
+
+    #[inline]
     pub fn item(&self) -> &T {
         &self.item
     }
@@ -155,5 +165,12 @@ impl<T> Slot<T> {
     #[inline]
     pub fn item_mut(&mut self) -> &mut T {
         &mut self.item
+    }
+}
+
+
+impl<T> Slot<Box<T>> {
+    pub fn as_ptr(&mut self) -> ptr::NonNull<T> {
+        ptr::NonNull::from(self.item.deref_mut())
     }
 }
