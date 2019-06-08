@@ -1,11 +1,6 @@
 use std::{
-    mem,
-    ops::{Deref, DerefMut},
     ptr,
-    sync::{
-        atomic::{self, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use crate::traits::Clear;
@@ -27,16 +22,6 @@ pub struct Slot<T> {
 pub enum Error {
     AtCapacity,
     ShouldRetry,
-}
-
-pub struct Owned<T> {
-    slot: ptr::NonNull<Slot<T>>,
-    slab: Arc<Slab<T>>,
-}
-
-pub struct Shared<T> {
-    slot: ptr::NonNull<Slot<T>>,
-    slab: Arc<Slab<T>>,
 }
 
 // ===== impl Slot =====
@@ -72,18 +57,17 @@ impl<T> Slab<T>
 where
     T: Clear,
 {
-    // &Arc<Self> is not a valid method reciever T_T
-    pub fn try_checkout(this: &Arc<Self>) -> Result<Owned<T>, Error> {
+    pub fn try_checkout(&self) -> Result<ptr::NonNull<Slot<T>>, Error> {
         // The slab's free list is a modification of Treiber's lock-free stack,
         // using slab indices instead of pointers, and with a provison for
         // growing the slab when needed.
         //
         // In order to check out an item from the slab, we "pop" the next free
         // slot from the stack.
-        let idx = this.head.load(Ordering::Acquire);
+        let idx = self.head.load(Ordering::Acquire);
 
         // Can we insert without reallocating?
-        let len = this.inner.len();
+        let len = self.inner.len();
 
         // println!("try_checkout head={:?}; len={:?}", idx, len);
         if idx >= len {
@@ -91,20 +75,17 @@ where
         }
 
         // If someone else has locked the slot, bail and try again.
-        let slot_ref = &this.inner[idx];
-        let mut slot = slot_ref.try_acquire()?;
-        let next = slot_ref.next();
+        let slot = &self.inner[idx];
+        let mut lease = slot.try_acquire()?;
+        let next = slot.next();
 
         // Is our snapshot still valid?
-        if this.head.compare_and_swap(idx, next, Ordering::Release) == idx {
+        if self.head.compare_and_swap(idx, next, Ordering::Release) == idx {
             // We can use this slot!
-            unsafe { slot.as_mut() }.item.clear();
-            Ok(Owned {
-                slot,
-                slab: this.clone(),
-            })
+            unsafe { lease.as_mut() }.item.clear();
+            Ok(lease)
         } else {
-            slot_ref.release();
+            slot.release();
             Err(Error::ShouldRetry)
         }
     }
@@ -135,17 +116,19 @@ impl<T> Slot<T> {
     }
 
     fn release(&self) -> bool {
-        if self.ref_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            // We are freeing the slot, synchronize here.
-            atomic::fence(Ordering::Release);
-            true
-        } else {
-            false
-        }
+        self.ref_count.fetch_sub(1, Ordering::Relaxed) == 1
     }
 
     pub fn clone_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn drop_ref(&self, slab: &Slab<T>) {
+        if self.release() {
+            // Free the slot.
+            let next = slab.head.swap(self.idx, Ordering::Release);
+            self.next.store(next, Ordering::Release);
+        }
     }
 
     #[inline]
@@ -156,110 +139,5 @@ impl<T> Slot<T> {
     #[inline]
     pub fn item_mut(&mut self) -> &mut T {
         &mut self.item
-    }
-}
-
-// == impl Owned ===
-
-impl<T> Deref for Owned<T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            // An `Owned` checkout requires that we have unique access to this
-            // slot.
-            self.slot.as_ref().item()
-        }
-    }
-}
-
-impl<T> DerefMut for Owned<T> {
-
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            // An `Owned` checkout requires that we have unique access to this
-            // slot, and an `&mut Owned` ensures the slot cannot be mutably
-            // dereferenced with a shared ref to the owned checkout.
-            self.slot.as_mut().item_mut()
-        }
-    }
-}
-
-impl<T> Drop for Owned<T> {
-    fn drop(&mut self) {
-        let slot = unsafe { self.slot.as_ref() };
-        if slot.release() {
-            let next = self.slab.head.swap(slot.idx, Ordering::Release);
-            slot.next.store(next, Ordering::Release);
-        }
-    }
-}
-
-impl<T> Owned<T> {
-    pub fn downgrade(self) -> Shared<T> {
-        // TODO: cloning the slot and slab will cause two ref-count bumps (one
-        // for the slot's ref count, and one for the Arc), but we can't move out
-        // of `self` since `Owned` implements `Drop`. This may not be a big deal
-        // but it would be nice to fix.
-        Shared::new(&self.slot, &self.slab)
-    }
-
-    pub fn detach(&mut self) -> T
-    where
-        T: Default,
-    {
-        self.detach_with(T::default)
-    }
-
-    pub fn detach_with(&mut self, new: impl FnOnce() -> T) -> T {
-        unsafe { mem::replace(self.slot.as_mut().item_mut(), new()) }
-    }
-}
-
-// === impl Shared ===
-
-impl<T> Shared<T> {
-    fn new(slot: &ptr::NonNull<Slot<T>>, slab: &Arc<Slab<T>>) -> Self {
-        unsafe {
-            slot.as_ref().clone_ref();
-        }
-        Self {
-            slot: slot.clone(),
-            slab: slab.clone(),
-        }
-    }
-
-    pub fn try_upgrade(self) -> Result<Owned<T>, Self> {
-        unimplemented!()
-    }
-}
-
-impl<T> Clone for Shared<T> {
-    fn clone(&self) -> Self {
-        Self::new(&self.slot, &self.slab)
-    }
-}
-
-impl<T> Deref for Shared<T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            // A `Shared` checkout implies that the slot may not be mutated.
-            self.slot.as_ref().item()
-        }
-    }
-}
-
-impl<T> Drop for Shared<T> {
-    fn drop(&mut self) {
-        let slot = unsafe { self.slot.as_ref() };
-        if slot.release() {
-            let next = self.slab.head.swap(slot.idx, Ordering::Release);
-            slot.next.store(next, Ordering::Release);
-        }
     }
 }

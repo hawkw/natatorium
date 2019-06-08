@@ -1,255 +1,164 @@
-// use crate::{
-//     slab::{self, Slab},
-//     traits::Clear,
-// };
-// use owning_ref::OwningHandle;
-// use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-// use std::{
-//     mem,
-//     ops::{Deref, DerefMut},
-//     sync::atomic,
-// };
+use std::sync::{Arc, RwLock};
+use crate::{traits, slab::{self, Slab}};
 
+#[derive(Clone)]
+pub struct Pool<T, N = fn() -> T> {
+    inner: Arc<RwLock<Inner<T, N>>>,
+}
 
-// #[derive(Debug)]
-// pub struct Pool<T, F = fn() -> T> {
-//     slab: RwLock<Slab<T>>,
-//     new: F,
-// }
+pub struct Owned<T, N = fn() -> T> {
+    slot: ptr::NonNull<slab::Slot<T>>,
+    slab: Arc<RwLock<Inner<T, N>>>,
+}
 
-// pub struct Owned<'a, T> {
-//     inner: Option<OwningHandle<RwLockReadGuard<'a, Slab<T>>, RwLockWriteGuard<'a, slab::Slot<T>>>>,
-// }
+pub struct Shared<T, N = fn() -> T> {
+    slot: ptr::NonNull<slab::Slot<T>>,
+    slab: Arc<RwLock<Inner<T, N>>>,
+}
 
-// pub struct Shared<'a, T> {
-//     inner: OwningHandle<RwLockReadGuard<'a, Slab<T>>, RwLockReadGuard<'a, slab::Slot<T>>>,
-// }
+struct Inner<T, N> {
+    slab: Slab<T>,
+    new: N,
+}
 
-// impl<T: Default> Default for Pool<T> {
-//     fn default() -> Self {
-//         Self::new_from_fn(T::default)
-//     }
-// }
+impl<T, N> Pool<T, N>
+where
+    T: Clear,
+    N: FnMut() -> T,
+{
+    /// Attempt to check out a pooled resource _without_ growing the slab.
+    pub fn try_checkout(&self) -> Option<Owned<T>> {
+        loop {
+            return match self.try_checkout2() {
+                Ok(checkout) => checkout
+                Err(slab::Error::AtCapacity) => None,
+                Err(slab::Error::ShouldRetry) => {
+                    atomic::spin_loop_hint();
+                    continue;
+                }
+            }
+        }
+    }
 
-// impl<T: Default> Pool<T> {
-//     pub fn new() -> Self {
-//         Pool::default()
-//     }
+    fn try_checkout2(&self) -> Result<Owned<T>, slab::Error> {
+        let this = self.inner.read().expect("pool poisoned");
+        Ok(Owned {
+            slot: this.slab.try_checkout()?,
+            slab: self.inner.clone(),
+        })
+    }
 
-//     pub fn with_capacity(cap: usize) -> Self {
-//         Self::new_from_fn_with_capacity(cap, T::default)
-//     }
-// }
+    pub fn checkout(&self) -> Owned<T> {
+        loop {
+            match self.try_checkout2() {
+                Ok(checkout) => return checkout,
+                Err(slab::Error::AtCapacity) => {
+                    let mut this = self.inner.write().expect("pool poisoned");
+                    this.slab.grow_with(1, this.new);
+                }
+                Err(slab::Error::ShouldRetry) => {}
+            }
 
-// impl<T, F> Pool<T, F>
-// where
-//     F: Fn() -> T,
-// {
-//     pub fn new_from_fn(new: F) -> Self {
-//         Self::new_from_fn_with_capacity(1, new)
-//     }
+            atomic::spin_loop_hint();
+        }
+    }
+}
 
-//     pub fn new_from_fn_with_capacity(cap: usize, new: F) -> Self {
-//         Pool {
-//             slab: RwLock::new(Slab::new_from_fn(cap, &new)),
-//             new,
-//         }
-//     }
-// }
+// == impl Owned ===
 
-// impl<T, F> Pool<T, F>
-// where
-//     F: Fn() -> T,
-//     T: Clear,
-// {
-//     fn try_checkout2<'a>(&'a self) -> Result<Owned<'a, T>, slab::Error> {
-//         OwningHandle::try_new(self.slab.read(), |slab| {
-//             let slab = unsafe { &(*slab) };
-//             slab.try_checkout()
-//         }).map(|lock| Owned { inner: Some(lock) })
-//     }
+impl<T, N> Deref for Owned<T, N> {
+    type Target = T;
 
-//     /// Attempt to check out a pooled resource _without_ growing the slab.
-//     pub fn try_checkout<'a>(&'a self) -> Option<Owned<'a, T>> {
-//         loop {
-//             match self.try_checkout2() {
-//                 Ok(checkout) => return Some(checkout),
-//                 Err(slab::Error::AtCapacity) => return None,
-//                 Err(slab::Error::ShouldRetry) => {}
-//             }
-//             atomic::spin_loop_hint();
-//         }
-//     }
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            // An `Owned` checkout requires that we have unique access to this
+            // slot.
+            self.slot.as_ref().item()
+        }
+    }
+}
 
-//     pub fn checkout<'a>(&'a self) -> Owned<'a, T> {
-//         loop {
-//             match self.try_checkout2() {
-//                 Ok(checkout) => return checkout,
-//                 Err(slab::Error::AtCapacity) => {
-//                     // We need to grow the slab, and must acquire a write lock.
-//                     if let Some(mut slab) = self.slab.try_write() {
-//                         // TODO: grow the slab in chunks to avoid  having to do
-//                         // this as often.
-//                         slab.grow_by(1, &self.new);
-//                     }
-//                 }
-//                 Err(slab::Error::ShouldRetry) => {}
-//             }
+impl<T, N> DerefMut for Owned<T, N> {
 
-//             // If the snapshot got stale, or our attempt to grow the slab
-//             // failed, spin and retry.
-//             atomic::spin_loop_hint();
-//         }
-//     }
-// }
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            // An `Owned` checkout requires that we have unique access to this
+            // slot, and an `&mut Owned` ensures the slot cannot be mutably
+            // dereferenced with a shared ref to the owned checkout.
+            self.slot.as_mut().item_mut()
+        }
+    }
+}
 
-// // ===== impl Owned =====
+impl<T, N> Drop for Owned<T, N> {
+    fn drop(&mut self) {
+        let slot = unsafe { self.slot.as_ref() };
+        slot.drop_ref(&self.slab);
+    }
+}
 
-// impl<'a, T> Deref for Owned<'a, T> {
-//     type Target = T;
+impl<T, N> Owned<T, N> {
+    pub fn downgrade(self) -> Shared<T, N> {
+        // TODO: cloning the slot and slab will cause two ref-count bumps (one
+        // for the slot's ref count, and one for the Arc), but we can't move out
+        // of `self` since `Owned` implements `Drop`. This may not be a big deal
+        // but it would be nice to fix.
+        Shared::new(&self.slot, &self.slab)
+    }
 
-//     #[inline]
-//     fn deref(&self) -> &Self::Target {
-//         self.inner
-//             .as_ref()
-//             .expect("lock only taken on drop")
-//             .deref()
-//             .item()
-//     }
-// }
+    pub fn detach(&mut self) -> T
+    where
+        T: Default,
+    {
+        self.detach_with(T::default)
+    }
 
-// impl<'a, T> DerefMut for Owned<'a, T> {
-//     #[inline]
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         self.inner
-//             .as_mut()
-//             .expect("lock only taken on drop")
-//             .deref_mut()
-//             .item_mut()
-//     }
-// }
+    pub fn detach_with(&mut self, new: impl FnOnce() -> T) -> T {
+        unsafe { mem::replace(self.slot.as_mut().item_mut(), new()) }
+    }
+}
 
-// impl<'a, T> Owned<'a, T> {
-//     pub fn downgrade(mut self) -> Shared<'a, T> {
-//         let lock = self.inner.take().expect("lock only taken on drop");
-//         let index = lock.index();
-//         let inner = OwningHandle::new_with_fn(lock.into_owner(), |slab| {
-//             let slab = unsafe { &(*slab) };
-//             slab.try_read(index).expect("lock should be released")
-//         });
-//         Shared { inner }
-//     }
-// }
+// === impl Shared ===
 
-// impl<'a, T> Owned<'a, T>
-// where
-//     T: Default,
-// {
-//     pub fn detach(mut self) -> T {
-//         mem::replace(self.deref_mut(), T::default())
-//     }
-// }
+impl<T, N> Shared<T, N> {
+    fn new(slot: &ptr::NonNull<slab::Slot<T>>, slab: &Arc<RwLock<Inner<T, N>>>>) -> Self {
+        unsafe {
+            slot.as_ref().clone_ref();
+        }
+        Self {
+            slot: slot.clone(),
+            slab: slab.clone(),
+        }
+    }
 
-// impl<'a, T> Drop for Owned<'a, T> {
-//     fn drop(&mut self) {
-//         if let Some(lock) = self.inner.take() {
-//             let head = lock.as_owner().head();
-//             lock.drop_ref(head);
-//         }
-//     }
-// }
+    pub fn try_upgrade(self) -> Result<Owned<T, N>, Self> {
+        unimplemented!()
+    }
+}
 
+impl<T, N> Clone for Shared<T, N> {
+    fn clone(&self) -> Self {
+        Self::new(&self.slot, &self.slab)
+    }
+}
 
-// // ===== impl Shared =====
+impl<T, N> Deref for Shared<T, N> {
+    type Target = T;
 
-// impl<'a, T> Deref for Shared<'a, T> {
-//     type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            // A `Shared` checkout implies that the slot may not be mutated.
+            self.slot.as_ref().item()
+        }
+    }
+}
 
-//     #[inline]
-//     fn deref(&self) -> &Self::Target {
-//         self.inner.deref().item()
-//     }
-// }
-
-// impl<'a, T> Clone for Shared<'a, T> {
-//     fn clone(&self) -> Self {
-//         let index = self.inner.index();
-
-//         // Acquire a new outer read lock.
-//         let lock = RwLockReadGuard::rwlock(self.inner.as_owner())
-//             .try_read()
-//             .expect("slab is already read locked");
-
-//         // Acquire an additional read lock on the slot.
-//         let inner = OwningHandle::new_with_fn(lock, |slab| {
-//             let slab = unsafe { &(*slab) };
-//             slab.try_read(index).expect("slot is already read locked")
-//         });
-//         inner.clone_ref();
-
-//         Shared { inner }
-//     }
-// }
-
-// impl<'a, T> Drop for Shared<'a, T> {
-//     fn drop(&mut self) {
-//         let head = self.inner.as_owner().head();
-//         self.inner.drop_ref(head);
-//     }
-// }
-
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn new_checkouts_are_empty() {
-//         let pool: Pool<String> = Pool::with_capacity(3);
-
-//         let mut c1 = pool.checkout();
-//         assert_eq!("", *c1);
-//         c1.push_str("i'm checkout 1");
-
-//         let mut c2 = pool.checkout();
-//         assert_eq!("", *c2);
-//         c2.push_str("i'm checkout 2");
-
-//         let mut c3 = pool.checkout();
-//         assert_eq!("", *c3);
-//         c3.push_str("i'm checkout 3");
-//     }
-
-//     #[test]
-//     fn capacity_released_when_checkout_is_dropped() {
-//         let pool: Pool<String> = Pool::with_capacity(1);
-//         let checkout = pool.checkout();
-//         assert!(pool.try_checkout().is_none());
-//         drop(checkout);
-//         assert!(pool.try_checkout().is_some());
-//     }
-
-//     #[test]
-//     fn capacity_released_when_all_shared_refs_are_dropped() {
-//         let pool: Pool<String> = Pool::with_capacity(1);
-
-//         let shared1 = pool.checkout().downgrade();
-//         assert!(pool.try_checkout().is_none());
-
-//         let shared2 = shared1.clone();
-//         assert!(pool.try_checkout().is_none());
-
-//         let shared3 = shared2.clone();
-//         assert!(pool.try_checkout().is_none());
-
-//         drop(shared2);
-//         assert!(pool.try_checkout().is_none());
-
-//         drop(shared1);
-//         assert!(pool.try_checkout().is_none());
-
-//         drop(shared3);
-//         assert!(pool.try_checkout().is_some());
-//     }
-
-// }
+impl<T, N> Drop for Shared<T, N> {
+    fn drop(&mut self) {
+        let slot = unsafe { self.slot.as_ref() };
+        slot.drop_ref(&self.slab);
+    }
+}
