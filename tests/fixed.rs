@@ -1,6 +1,4 @@
-use natatorium::{
-    fixed::Pool,
-};
+use natatorium::fixed::Pool;
 
 #[test]
 fn new_checkouts_are_empty() {
@@ -17,6 +15,32 @@ fn new_checkouts_are_empty() {
     let mut c3 = pool.checkout();
     assert_eq!("", *c3);
     c3.push_str("i'm checkout 3");
+}
+
+#[test]
+fn reusing_a_slot_clears_data() {
+    use std::fmt::Write;
+    let pool: Pool<String> = Pool::with_capacity(1);
+
+    for i in 0..3 {
+        let mut c = pool.checkout();
+        assert_eq!("", *c);
+        write!(*c, "i'm checkout {:?}", i).unwrap();
+    }
+}
+
+#[test]
+fn reusing_a_slot_retains_capacity() {
+    use std::fmt::Write;
+    let pool: Pool<String> = Pool::with_capacity(1);
+
+    let mut prior_cap = 0;
+    for i in 0..3 {
+        let mut c = pool.checkout();
+        assert_eq!(prior_cap, c.capacity());
+        write!(*c, "i'm checkout {:?}", 1).unwrap();
+        prior_cap = c.capacity();
+    }
 }
 
 #[test]
