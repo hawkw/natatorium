@@ -42,10 +42,6 @@ impl<T> Slab<T> {
         this
     }
 
-    pub fn double(&mut self, new: &mut impl FnMut() -> T) {
-        self.grow_by(self.inner.len(), new)
-    }
-
     pub fn grow_by(&mut self, cap: usize, new: &mut impl FnMut() -> T) {
         let next = self.inner.len();
 

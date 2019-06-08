@@ -9,9 +9,32 @@ pub struct Builder<S, T, N = fn() -> T> {
     item: PhantomData<fn() -> T>,
 }
 
+impl<T> Builder<(), T, ()> {
+    pub fn new() -> Self {
+        Self {
+            new: (),
+            settings: (),
+            capacity: 256,
+            item: PhantomData,
+        }
+    }
+}
+
 impl<S, T, N> Builder<S, T, N> {
     pub fn with_elements(self, capacity: usize) -> Self {
         Self { capacity, ..self }
+    }
+
+    pub fn with_default(self) -> Builder<S, T>
+    where
+        T: Default,
+    {
+        Builder {
+            new: T::default,
+            capacity: self.capacity,
+            settings: self.settings,
+            item: PhantomData,
+        }
     }
 
     pub fn with_fn<F>(self, new: F) -> Builder<S, T, F>
@@ -42,6 +65,13 @@ impl<S, T, N> Builder<S, T, N> {
             settings: fixed::Settings::default(),
             item: PhantomData,
         }
+    }
+
+    pub fn finish(self) -> S::Pool
+    where
+        S: settings::Make<T, N>,
+    {
+        S::make(self)
     }
 
     pub(crate) fn slab(&mut self) -> slab::Slab<T>
@@ -86,11 +116,15 @@ impl<T, N> Builder<growable::Settings, T, N> {
 
 impl<T: Default> Default for Builder<(), T> {
     fn default() -> Self {
-        Builder {
-            new: T::default,
-            capacity: 256,
-            item: PhantomData,
-            settings: (),
-        }
+        Builder::new().with_default()
+    }
+}
+
+pub(crate) mod settings {
+    use super::Builder;
+
+    pub trait Make<T, N>: Sized {
+        type Pool;
+        fn make(builder: Builder<Self, T, N>) -> Self::Pool;
     }
 }

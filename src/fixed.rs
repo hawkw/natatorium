@@ -1,6 +1,7 @@
 use crate::{
     slab::{self, Slab},
     traits::Clear,
+    builder::{Builder, settings},
 };
 
 use std::{
@@ -9,7 +10,6 @@ use std::{
     ptr,
     sync::{atomic, Arc},
 };
-
 
 #[derive(Debug, Clone)]
 pub struct Pool<T> {
@@ -33,29 +33,23 @@ pub struct Settings {
 
 impl<T: Default> Default for Pool<T> {
     fn default() -> Self {
-        Self::from_fn(T::default)
+        Self::new()
     }
 }
 
 impl<T: Default> Pool<T> {
     pub fn new() -> Self {
-        Pool::default()
+        Builder::default().fixed().finish()
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self::from_fn_with_capacity(cap, T::default)
+        Builder::default().fixed().with_elements(cap).finish()
     }
 }
 
 impl<T> Pool<T> {
-    pub fn from_fn(new: impl FnMut() -> T) -> Self {
-        Self::from_fn_with_capacity(256, new)
-    }
-
-    pub fn from_fn_with_capacity(cap: usize, new: mut impl FnMut() -> T) -> Self {
-        Self {
-            slab: Arc::new(Slab::from_fn(cap, &mut new)),
-        }
+    pub fn builder() -> Builder<Settings, T, ()> {
+        Builder::new().fixed()
     }
 
     pub fn size(&self) -> usize {
@@ -68,6 +62,24 @@ impl<T> Pool<T> {
 
     pub fn remaining(&self) -> usize {
         self.slab.remaining()
+    }
+}
+
+impl<T, N> From<Builder<Settings, T, N>> for Pool<T>
+where
+    N: FnMut() -> T,
+{
+    fn from(builder: Builder<Settings, T, N>) -> Self {
+        builder.finish()
+    }
+}
+
+impl<T, N> From<N> for Pool<T>
+where
+    N: FnMut() -> T,
+{
+    fn from(new: N) -> Self {
+        Self::builder().with_fn(new).fixed().finish()
     }
 }
 
@@ -219,6 +231,18 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             _p: (),
+        }
+    }
+}
+
+impl<T, N> settings::Make<T, N> for Settings
+where
+    N: FnMut() -> T,
+{
+    type Pool = Pool<T>;
+    fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
+        Pool {
+            slab: Arc::new(builder.slab())
         }
     }
 }

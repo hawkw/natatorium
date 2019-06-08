@@ -1,7 +1,14 @@
+use crate::{
+    builder::{settings, Builder},
+    slab::{self, Slab},
+    Clear,
+};
 use std::{
-    ptr, sync::{Arc, RwLock, RwLockReadGuard, atomic},
-    ops::{Deref, DerefMut}, mem};
-use crate::{Clear, slab::{self, Slab}, builder::Builder};
+    mem,
+    ops::{Deref, DerefMut},
+    ptr,
+    sync::{atomic, Arc, RwLock, RwLockReadGuard},
+};
 
 #[derive(Clone)]
 pub struct Pool<T, N = fn() -> T> {
@@ -36,6 +43,26 @@ struct Inner<T, N> {
     settings: Settings,
 }
 
+// === impl Pool ===
+
+impl<T> Pool<T>
+where
+    T: Default,
+{
+    pub fn new() -> Self {
+        Pool::builder().with_default().with_elements(0).finish()
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        Pool::builder().with_default().with_elements(cap).finish()
+    }
+}
+
+impl<T> Pool<T, ()> {
+    pub fn builder() -> Builder<Settings, T, ()> {
+        Builder::new().growable()
+    }
+}
 
 impl<T, N> Pool<T, N> {
     fn read<'a>(&'a self) -> RwLockReadGuard<'a, Inner<T, N>> {
@@ -70,7 +97,7 @@ where
                     atomic::spin_loop_hint();
                     continue;
                 }
-            }
+            };
         }
     }
 
@@ -91,11 +118,7 @@ where
         loop {
             match self.try_checkout2() {
                 Ok(checkout) => return checkout,
-                Err(slab::Error::AtCapacity) => self
-                    .inner
-                    .write()
-                    .expect("pool poisoned")
-                    .grow(),
+                Err(slab::Error::AtCapacity) => self.inner.write().expect("pool poisoned").grow(),
                 Err(slab::Error::ShouldRetry) => {}
             }
 
@@ -109,13 +132,25 @@ where
     N: FnMut() -> T,
 {
     fn from(builder: Builder<Settings, T, N>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Inner {
-                slab: builder.slab(),
-                new: builder.new,
-                settings: builder.settings,
-            }))
-        }
+        builder.finish()
+    }
+}
+
+impl<T, N> From<N> for Pool<T, N>
+where
+    N: FnMut() -> T,
+{
+    fn from(new: N) -> Self {
+        Builder::new().growable().with_fn(new).finish()
+    }
+}
+
+impl<T> Default for Pool<T>
+where
+    T: Default,
+{
+    fn default() -> Self {
+        Builder::new().with_default().growable().finish()
     }
 }
 
@@ -172,7 +207,7 @@ impl<T, N> Owned<T, N> {
         N: FnMut() -> T,
     {
         let mut lock = self.slab.write().expect("pool poisoned");
-        let mut new = lock.new;
+        let new = &mut lock.new;
         let slot = unsafe { self.slot.as_mut() }.item_mut();
         mem::replace(slot, new())
     }
@@ -236,6 +271,21 @@ impl Default for Settings {
     }
 }
 
+impl<T, N> settings::Make<T, N> for Settings
+where
+    N: FnMut() -> T,
+{
+    type Pool = Pool<T, N>;
+    fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
+        Pool {
+            inner: Arc::new(RwLock::new(Inner {
+                slab: builder.slab(),
+                new: builder.new,
+                settings: builder.settings,
+            })),
+        }
+    }
+}
 
 // === impl Inner ===
 
