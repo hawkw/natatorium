@@ -57,6 +57,18 @@ impl<T> Pool<T> {
             slab: Arc::new(Slab::from_fn(cap, &mut new)),
         }
     }
+
+    pub fn size(&self) -> usize {
+        self.slab.size()
+    }
+
+    pub fn used(&self) -> usize {
+        self.slab.used()
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.slab.remaining()
+    }
 }
 
 impl<T> Pool<T>

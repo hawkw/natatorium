@@ -9,6 +9,7 @@ use crate::traits::Clear;
 pub struct Slab<T> {
     inner: Vec<Slot<T>>,
     head: AtomicUsize,
+    used: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -31,6 +32,7 @@ impl<T> Slab<T> {
         Slab {
             inner: Vec::new(),
             head: AtomicUsize::from(0),
+            used: AtomicUsize::from(0),
         }
     }
 
@@ -58,6 +60,14 @@ impl<T> Slab<T> {
 
     pub fn size(&self) -> usize {
         self.inner.len()
+    }
+
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.size() - self.used()
     }
 }
 
@@ -91,6 +101,7 @@ where
         if self.head.compare_and_swap(idx, next, Ordering::Release) == idx {
             // We can use this slot!
             unsafe { lease.as_mut() }.item.clear();
+            self.used.fetch_add(1, Ordering::Relaxed);
             Ok(lease)
         } else {
             slot.release();
@@ -136,6 +147,7 @@ impl<T> Slot<T> {
             // Free the slot.
             let next = slab.head.swap(self.idx, Ordering::Release);
             self.next.store(next, Ordering::Release);
+            slab.used.fetch_sub(1, Ordering::Relaxed);
         }
     }
 

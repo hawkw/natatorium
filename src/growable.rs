@@ -45,6 +45,14 @@ impl<T, N> Pool<T, N> {
     pub fn size(&self) -> usize {
         self.read().slab.size()
     }
+
+    pub fn used(&self) -> usize {
+        self.read().slab.used()
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.read().slab.remaining()
+    }
 }
 
 impl<T, N> Pool<T, N>
