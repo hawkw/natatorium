@@ -2,5 +2,7 @@
 
 pub mod traits;
 pub mod fixed;
-pub mod growable;
+// pub mod growable;
 pub(crate) mod slab;
+
+pub use self::slab::{Owned, Shared};
