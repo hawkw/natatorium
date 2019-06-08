@@ -12,10 +12,15 @@ pub trait Clear {
     fn clear(&mut self);
 }
 
-pub trait WithCapacity {
+
+pub trait HasCapacity {
     fn capacity(&self) -> usize;
 
     fn shrink_to_fit(&mut self);
+}
+
+pub trait WithCapacity: HasCapacity {
+    fn with_capacity(cap: usize) -> Self;
 }
 
 // ===== impl Clear =====
@@ -56,9 +61,9 @@ impl Clear for String {
     }
 }
 
-// ===== impl WithCapacity =====
+// ===== impl HasCapacity =====
 
-impl<T> WithCapacity for Vec<T> {
+impl<T> HasCapacity for Vec<T> {
     #[inline]
     fn capacity(&self) -> usize {
         Vec::capacity(self)
@@ -70,23 +75,40 @@ impl<T> WithCapacity for Vec<T> {
     }
 }
 
-impl<K, V, S> WithCapacity for collections::HashMap<K, V, S>
+impl<T> WithCapacity for Vec<T> {
+    #[inline]
+    fn with_capacity(cap: usize) -> Self {
+        Vec::with_capacity(cap)
+    }
+}
+
+impl<K, V, S> HasCapacity for collections::HashMap<K, V, S>
 where
     K: hash::Hash + Eq,
     S: hash::BuildHasher,
 {
     #[inline]
+    fn shrink_to_fit(&mut self) {
+        collections::HashMap::shrink_to_fit(self)
+    }
+
+    #[inline]
     fn capacity(&self) -> usize {
         collections::HashMap::capacity(self)
     }
 
+}
+impl<K, V> WithCapacity for collections::HashMap<K, V>
+where
+    K: hash::Hash + Eq,
+{
     #[inline]
-    fn shrink_to_fit(&mut self) {
-        collections::HashMap::shrink_to_fit(self)
+    fn with_capacity(cap: usize) -> Self {
+        collections::HashMap::with_capacity(cap)
     }
 }
 
-impl WithCapacity for String {
+impl HasCapacity for String {
     #[inline]
     fn capacity(&self) -> usize {
         String::capacity(self)
@@ -95,5 +117,12 @@ impl WithCapacity for String {
     #[inline]
     fn shrink_to_fit(&mut self) {
         String::shrink_to_fit(self)
+    }
+}
+
+impl WithCapacity for String {
+    #[inline]
+    fn with_capacity(cap: usize) -> Self {
+        String::with_capacity(cap)
     }
 }

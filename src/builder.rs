@@ -10,7 +10,7 @@ pub struct Builder<S, T, N = fn() -> T> {
 }
 
 impl<S, T, N> Builder<S, T, N> {
-    pub fn with_capacity(self, capacity: usize) -> Self {
+    pub fn with_elements(self, capacity: usize) -> Self {
         Self { capacity, ..self }
     }
 
