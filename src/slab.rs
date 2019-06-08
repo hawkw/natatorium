@@ -34,13 +34,17 @@ impl<T> Slab<T> {
         }
     }
 
-    pub fn from_fn(cap: usize, new: impl FnMut() -> T) -> Self {
+    pub fn from_fn(cap: usize, new: &mut impl FnMut() -> T) -> Self {
         let mut this = Self::new();
         this.grow_by(cap, new);
         this
     }
 
-    pub fn grow_by(&mut self, cap: usize, mut new: impl FnMut() -> T) {
+    pub fn double(&mut self, new: &mut impl FnMut() -> T) {
+        self.grow_by(self.inner.len(), new)
+    }
+
+    pub fn grow_by(&mut self, cap: usize, new: &mut impl FnMut() -> T) {
         let next = self.inner.len();
 
         // Avoid multiple allocations.
@@ -50,6 +54,10 @@ impl<T> Slab<T> {
         }
 
         self.head.store(next, Ordering::Release);
+    }
+
+    pub fn size(&self) -> usize {
+        self.inner.len()
     }
 }
 

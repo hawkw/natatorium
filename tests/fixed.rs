@@ -38,7 +38,7 @@ fn reusing_a_slot_retains_capacity() {
     for i in 0..3 {
         let mut c = pool.checkout();
         assert_eq!(prior_cap, c.capacity());
-        write!(*c, "i'm checkout {:?}", 1).unwrap();
+        write!(*c, "i'm checkout {:?}", i).unwrap();
         prior_cap = c.capacity();
     }
 }

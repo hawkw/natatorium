@@ -16,7 +16,6 @@ pub struct Pool<T> {
     slab: Arc<Slab<T>>,
 }
 
-
 pub struct Owned<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
     slab: Arc<Slab<T>>,
@@ -25,6 +24,11 @@ pub struct Owned<T> {
 pub struct Shared<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
     slab: Arc<Slab<T>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Settings {
+    _p: (),
 }
 
 impl<T: Default> Default for Pool<T> {
@@ -48,9 +52,9 @@ impl<T> Pool<T> {
         Self::from_fn_with_capacity(256, new)
     }
 
-    pub fn from_fn_with_capacity(cap: usize, new: impl FnMut() -> T) -> Self {
+    pub fn from_fn_with_capacity(cap: usize, new: mut impl FnMut() -> T) -> Self {
         Self {
-            slab: Arc::new(Slab::from_fn(cap, new)),
+            slab: Arc::new(Slab::from_fn(cap, &mut new)),
         }
     }
 }
@@ -194,5 +198,15 @@ impl<T> Drop for Shared<T> {
     fn drop(&mut self) {
         let slot = unsafe { self.slot.as_ref() };
         slot.drop_ref(&self.slab);
+    }
+}
+
+// === impl Settings ===
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            _p: (),
+        }
     }
 }
