@@ -295,9 +295,11 @@ where
 {
     fn grow(&mut self) {
         let amt = match self.settings.growth {
+            Growth::Fixed(amt) => amt,
+            // If the slab is empty, grow 1 element.
+            Growth::Double | Growth::Half if self.slab.size() == 0 => 1,
             Growth::Double => self.slab.size(),
             Growth::Half => self.slab.size() / 2,
-            Growth::Fixed(amt) => amt,
         };
         self.slab.grow_by(amt, &mut self.new);
     }
