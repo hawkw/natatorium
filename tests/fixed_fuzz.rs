@@ -69,74 +69,103 @@ fn reusing_a_slot_clears_data() {
 fn capacity_released_when_checkout_is_dropped() {
     loom::fuzz(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
-        let cv = Arc::new((Mutex::new(0), Condvar::new()));
 
-        let cv2 = cv.clone();
+        let checked_out = Arc::new((Mutex::new(false), Condvar::new()));
+        let can_drop = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let checked_out2 = checked_out.clone();
+        let can_drop2 = can_drop.clone();
         let pool2 = pool.clone();
 
         let t = thread::spawn(move || {
-            let &(ref lock, ref cv) = &*cv2;
             let checkout = pool2.checkout();
 
-            *lock.lock().unwrap() = 1;
+            let &(ref lock, ref cv) = &*checked_out2;
+            *lock.lock().unwrap() = true;
             cv.notify_one();
 
-            let mut seen = lock.lock().unwrap();
-            while *seen != 2 {
-                seen = cv.wait(seen).unwrap();
+
+            let &(ref lock, ref cv) = &*can_drop2;
+            let mut can_drop = lock.lock().unwrap();
+            while !*can_drop {
+                can_drop = cv.wait(can_drop).unwrap();
             }
-
             drop(checkout);
-            *lock.lock().unwrap() = 3;
-            cv.notify_one();
         });
 
-
-        let &(ref lock, ref cv) = &*cv;
-        {
-            let mut checked_out = lock.lock().unwrap();
-            while *checked_out != 1 {
-                checked_out = cv.wait(checked_out).unwrap();
-            }
-            let ch = pool.try_checkout();
-            println!("ch={:?}", ch);
-            assert!(ch.is_none());
-            *checked_out = 2;
+        let &(ref lock, ref cv) = &*checked_out;
+        let mut checked_out = lock.lock().unwrap();
+        while !*checked_out {
+            checked_out = cv.wait(checked_out).unwrap();
         }
 
-        {
-            let mut dropped = lock.lock().unwrap();
-            while *dropped != 3 {
-                dropped = cv.wait(dropped).unwrap();
-            }
+        let ch = pool.try_checkout();
+        assert!(ch.is_none());
 
-            assert!(pool.try_checkout().is_some());
-        }
+        let &(ref lock, ref cv) = &*can_drop;
+        *lock.lock().unwrap() = true;
+        cv.notify_one();
 
         t.join().unwrap();
+
+        let ch = pool.try_checkout();
+        assert!(ch.is_some());
+
     })
 
 }
 
-// #[test]
-// fn capacity_released_when_all_shared_refs_are_dropped() {
-//     let pool: Pool<String> = Pool::with_capacity(1);
+#[test]
+fn checkout_waits_for_free_capacity() {
+    loom::fuzz(|| {
+        let pool: Pool<String> = Pool::with_capacity(1);
 
-//     let shared1 = pool.checkout().downgrade();
-//     assert!(pool.try_checkout().is_none());
+        let p = pool.clone();
+        thread::spawn(move || {
+            let mut ch = p.checkout();
+            ch.push_str("hello from thread 1!");
+            drop(ch)
+        });
 
-//     let shared2 = shared1.clone();
-//     assert!(pool.try_checkout().is_none());
+        let c = pool.checkout();
+        assert_eq!(*c, "");
+    });
+}
 
-//     let shared3 = shared2.clone();
-//     assert!(pool.try_checkout().is_none());
+#[test]
+fn capacity_released_when_all_shared_refs_are_dropped() {
+    loom::fuzz(|| {
+        let pool: Pool<String> = Pool::with_capacity(1);
 
-//     drop(shared2);
-//     assert!(pool.try_checkout().is_none());
+        let shared1 = pool.checkout().downgrade();
+        assert!(pool.try_checkout().is_none());
 
-//     drop(shared1);
-//     assert!(pool.try_checkout().is_none());
+        let shared2 = shared1.clone();
+        let pool2 = pool.clone();
+        let t1 = thread::spawn(move || {
+            assert!(pool2.try_checkout().is_none());
+            drop(shared2)
+        });
 
-//     drop(shared3);
-//     assert!(pool.try_checkout().is_some());
-// }
+        let shared2 = shared1.clone();
+        let pool2 = pool.clone();
+        let t2 = thread::spawn(move || {
+            assert!(pool2.try_checkout().is_none());
+            drop(shared2)
+        });
+
+        let pool2 = pool.clone();
+        let t3 = thread::spawn(move || {
+            assert!(pool2.try_checkout().is_none());
+            drop(shared1)
+        });
+
+        assert!(pool.try_checkout().is_none());
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
+        assert!(pool.try_checkout().is_some());
+    });
+}
