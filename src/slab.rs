@@ -31,8 +31,8 @@ impl<T> Slab<T> {
     pub fn new() -> Self {
         Slab {
             inner: Vec::new(),
-            head: AtomicUsize::from(0),
-            used: AtomicUsize::from(0),
+            head: AtomicUsize::new(0),
+            used: AtomicUsize::new(0),
         }
     }
 

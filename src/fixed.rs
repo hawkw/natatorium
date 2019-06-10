@@ -16,6 +16,7 @@ pub struct Pool<T> {
     slab: Arc<Slab<T>>,
 }
 
+#[derive(Debug)]
 pub struct Owned<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
     slab: Arc<Slab<T>>,
