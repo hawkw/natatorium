@@ -2,13 +2,13 @@ use crate::{
     slab::{self, Slab},
     traits::Clear,
     builder::{Builder, settings},
+    sync::{atomic, Arc},
 };
 
 use std::{
     mem,
     ops::{Deref, DerefMut},
     ptr,
-    sync::{atomic, Arc},
 };
 
 #[derive(Debug, Clone)]

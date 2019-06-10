@@ -1,10 +1,9 @@
-use std::{
-    ptr,
-    sync::atomic::{AtomicUsize, Ordering},
-    ops::DerefMut,
-};
+use std::{ops::DerefMut, ptr};
 
-use crate::traits::Clear;
+use crate::{
+    sync::atomic::{AtomicUsize, Ordering},
+    traits::Clear,
+};
 
 #[derive(Debug)]
 pub struct Slab<T> {

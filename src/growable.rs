@@ -2,12 +2,12 @@ use crate::{
     builder::{settings, Builder},
     slab::{self, Slab},
     Clear,
+    sync::{atomic, Arc, RwLock, RwLockReadGuard},
 };
 use std::{
     mem,
     ops::{Deref, DerefMut},
     ptr,
-    sync::{atomic, Arc, RwLock, RwLockReadGuard},
 };
 
 #[derive(Clone)]
