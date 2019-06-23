@@ -88,7 +88,7 @@ impl<T, N> Builder<growable::Settings, T, N> {
         Self {
             settings: growable::Settings {
                 growth: growable::Growth::Fixed(amount),
-                ..self.settings
+                // ..self.settings
             },
             ..self
         }
@@ -98,7 +98,7 @@ impl<T, N> Builder<growable::Settings, T, N> {
         Self {
             settings: growable::Settings {
                 growth: growable::Growth::Double,
-                ..self.settings
+                // ..self.settings
             },
             ..self
         }
@@ -108,7 +108,7 @@ impl<T, N> Builder<growable::Settings, T, N> {
         Self {
             settings: growable::Settings {
                 growth: growable::Growth::Half,
-                ..self.settings
+                // ..self.settings
             },
             ..self
         }

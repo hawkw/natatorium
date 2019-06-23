@@ -236,7 +236,7 @@ impl<T, N> Owned<T, N> {
         // for the slot's ref count, and one for the Arc), but we can't move out
         // of `self` since `Owned` implements `Drop`. This may not be a big deal
         // but it would be nice to fix.
-        Shared::new(&self.item, self.idx, &self.slab)
+        Shared::new(self.item, self.idx, self.slab.clone())
     }
 
     pub fn detach(&mut self) -> T
@@ -269,15 +269,15 @@ impl<T, N> Owned<T, N> {
 // === impl Shared ===
 
 impl<T, N> Shared<T, N> {
-    fn new(item: &ptr::NonNull<T>, idx: usize, slab: &Arc<RwLock<Inner<T, N>>>) -> Self {
+    fn new(item: ptr::NonNull<T>, idx: usize, slab: Arc<RwLock<Inner<T, N>>>) -> Self {
         slab.read()
             .expect("pool poisoned")
             .slab
             .slot(idx)
             .clone_ref();
         Self {
-            item: item.clone(),
-            slab: slab.clone(),
+            item,
+            slab,
             idx,
         }
     }
@@ -289,7 +289,7 @@ impl<T, N> Shared<T, N> {
 
 impl<T, N> Clone for Shared<T, N> {
     fn clone(&self) -> Self {
-        Self::new(&self.item, self.idx, &self.slab)
+        Self::new(self.item, self.idx, self.slab.clone())
     }
 }
 
