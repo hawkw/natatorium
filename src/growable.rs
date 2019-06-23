@@ -1,8 +1,8 @@
 use crate::{
     builder::{settings, Builder},
     slab::{self, Slab},
-    Clear,
     sync::{atomic, Arc, RwLock, RwLockReadGuard},
+    Clear,
 };
 use std::{
     mem,
@@ -32,7 +32,6 @@ pub struct Owned<T, N = fn() -> T> {
     idx: usize,
     slab: Arc<RwLock<Inner<T, N>>>,
 }
-
 
 /// A shared, atomically reference-counted checkout of an object in a [growable pool].
 ///
@@ -163,7 +162,7 @@ where
             }
 
             atomic::spin_loop_hint();
-        };
+        }
     }
 }
 
@@ -210,7 +209,6 @@ impl<T, N> Deref for Owned<T, N> {
 }
 
 impl<T, N> DerefMut for Owned<T, N> {
-
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
@@ -255,7 +253,10 @@ impl<T, N> Owned<T, N> {
     /// this `Owned` reference.
     pub fn assert_valid(&self) {
         assert_eq!(
-            self.read_slab().slot(self.idx).ref_count(atomic::Ordering::SeqCst), 1,
+            self.read_slab()
+                .slot(self.idx)
+                .ref_count(atomic::Ordering::SeqCst),
+            1,
             "invariant violated: owned checkout must have exactly one reference"
         );
     }
@@ -263,14 +264,17 @@ impl<T, N> Owned<T, N> {
     fn read_slab<'a>(&'a self) -> RwLockReadGuard<'a, Inner<T, N>> {
         self.slab.read().expect("pool poisoned")
     }
-
 }
 
 // === impl Shared ===
 
 impl<T, N> Shared<T, N> {
     fn new(item: &ptr::NonNull<T>, idx: usize, slab: &Arc<RwLock<Inner<T, N>>>) -> Self {
-        slab.read().expect("pool poisoned").slab.slot(idx).clone_ref();
+        slab.read()
+            .expect("pool poisoned")
+            .slab
+            .slot(idx)
+            .clone_ref();
         Self {
             item: item.clone(),
             slab: slab.clone(),
@@ -352,7 +356,7 @@ where
             Growth::Half => self.slab.size() / 2,
         };
         let new = &mut self.new;
-        self.slab.grow_by(amt, &mut || { Box::new((new)()) });
+        self.slab.grow_by(amt, &mut || Box::new((new)()));
     }
 }
 
@@ -365,4 +369,3 @@ impl<T, N> Inner<T, N> {
         self.slab.slot(idx)
     }
 }
-

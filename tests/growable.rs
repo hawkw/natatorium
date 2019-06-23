@@ -102,7 +102,7 @@ fn checkout_does_not_grow_if_free_capacity_remains() {
 
     assert_eq!(pool.size(), 1);
     assert_eq!(pool.used(), 0);
-    assert_eq!(pool.remaining(),1);
+    assert_eq!(pool.remaining(), 1);
 
     // Dropping the checkout will release its capacity.
     let _c = pool.checkout();

@@ -1,6 +1,6 @@
-use natatorium::fixed::Pool;
-use loom::thread;
 use loom::sync::{Arc, Condvar, Mutex};
+use loom::thread;
+use natatorium::fixed::Pool;
 
 #[test]
 fn new_checkouts_are_empty() {
@@ -34,17 +34,20 @@ fn new_checkouts_are_empty() {
 fn reusing_a_slot_clears_data() {
     loom::fuzz(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
-        (0..3).map(|i| {
-            let pool = pool.clone();
-            let t = thread::spawn(move || {
-                let mut c = pool.checkout();
-                assert_eq!("", *c);
-                c.push_str("checked out");
-            });
-            (i, t)
-        }).for_each(|(i, t)| {
-            t.join().unwrap_or_else(|e| panic!("thread {} panicked: {:?}", i, e));
-        })
+        (0..3)
+            .map(|i| {
+                let pool = pool.clone();
+                let t = thread::spawn(move || {
+                    let mut c = pool.checkout();
+                    assert_eq!("", *c);
+                    c.push_str("checked out");
+                });
+                (i, t)
+            })
+            .for_each(|(i, t)| {
+                t.join()
+                    .unwrap_or_else(|e| panic!("thread {} panicked: {:?}", i, e));
+            })
     });
 }
 
@@ -84,7 +87,6 @@ fn capacity_released_when_checkout_is_dropped() {
             *lock.lock().unwrap() = true;
             cv.notify_one();
 
-
             let &(ref lock, ref cv) = &*can_drop2;
             let mut can_drop = lock.lock().unwrap();
             while !*can_drop {
@@ -110,9 +112,7 @@ fn capacity_released_when_checkout_is_dropped() {
 
         let ch = pool.try_checkout();
         assert!(ch.is_some());
-
     })
-
 }
 
 #[test]

@@ -12,7 +12,6 @@ pub trait Clear {
     fn clear(&mut self);
 }
 
-
 pub trait HasCapacity {
     fn capacity(&self) -> usize;
 
@@ -106,7 +105,6 @@ where
     fn capacity(&self) -> usize {
         collections::HashMap::capacity(self)
     }
-
 }
 impl<K, V> WithCapacity for collections::HashMap<K, V>
 where

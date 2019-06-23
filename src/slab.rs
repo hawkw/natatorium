@@ -80,7 +80,8 @@ impl<T> Slab<T> {
             );
             if self.head.load(Ordering::SeqCst) == idx {
                 assert_eq!(
-                    slot.ref_count(Ordering::SeqCst), 0,
+                    slot.ref_count(Ordering::SeqCst),
+                    0,
                     "invariant violated: head slot had non-zero ref count",
                 );
             }
@@ -205,12 +206,12 @@ impl<T> Slot<T> {
     /// Asserts that this slot is currently in a valid state.
     pub fn assert_valid(&self) {
         assert_ne!(
-            self.next.load(Ordering::SeqCst), self.idx,
+            self.next.load(Ordering::SeqCst),
+            self.idx,
             "invariant violated: next pointer may not point to self"
         );
     }
 }
-
 
 impl<T> Slot<Box<T>> {
     pub fn as_ptr(&mut self) -> ptr::NonNull<T> {

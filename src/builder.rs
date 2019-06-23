@@ -1,5 +1,5 @@
+use crate::{fixed, growable, slab};
 use std::marker::PhantomData;
-use crate::{growable, fixed, slab};
 
 #[derive(Debug, Clone)]
 pub struct Builder<S, T, N = fn() -> T> {
@@ -79,7 +79,7 @@ impl<S, T, N> Builder<S, T, N> {
         N: FnMut() -> T,
         T: Into<I>,
     {
-        slab::Slab::from_fn(self.capacity, &mut || { (self.new)().into()})
+        slab::Slab::from_fn(self.capacity, &mut || (self.new)().into())
     }
 }
 

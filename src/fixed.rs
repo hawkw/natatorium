@@ -1,8 +1,8 @@
 use crate::{
+    builder::{settings, Builder},
     slab::{self, Slab},
-    traits::Clear,
-    builder::{Builder, settings},
     sync::{atomic, Arc},
+    traits::Clear,
 };
 
 use std::{
@@ -101,7 +101,7 @@ where
                     #[cfg(debug_assertions)]
                     checkout.assert_valid();
 
-                    return Some(checkout)
+                    return Some(checkout);
                 }
                 Err(slab::Error::AtCapacity) => return None,
                 Err(slab::Error::ShouldRetry) => {}
@@ -139,7 +139,6 @@ impl<T> Deref for Owned<T> {
 }
 
 impl<T> DerefMut for Owned<T> {
-
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
@@ -181,17 +180,15 @@ impl<T> Owned<T> {
     /// Asserts that the invariants enforced by the pool are currently valid for
     /// this `Owned` reference.
     pub fn assert_valid(&self) {
-        let slot = unsafe {
-            self.slot.as_ref()
-        };
+        let slot = unsafe { self.slot.as_ref() };
         assert_eq!(
-            slot.ref_count(atomic::Ordering::SeqCst), 1,
+            slot.ref_count(atomic::Ordering::SeqCst),
+            1,
             "invariant violated: owned checkout must have exactly one reference"
         );
         slot.assert_valid();
         self.slab.assert_valid();
     }
-
 }
 
 // === impl Shared ===
@@ -241,9 +238,7 @@ impl<T> Drop for Shared<T> {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            _p: (),
-        }
+        Self { _p: () }
     }
 }
 
@@ -254,7 +249,7 @@ where
     type Pool = Pool<T>;
     fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
         Pool {
-            slab: Arc::new(builder.slab())
+            slab: Arc::new(builder.slab()),
         }
     }
 }
