@@ -79,7 +79,7 @@ fn capacity_released_when_all_shared_refs_are_dropped() {
 fn checkout_grows_empty_pool() {
     let pool: Pool<String> = Pool::with_capacity(0);
     assert_eq!(pool.size(), 0);
-    let c = pool.checkout();
+    let _c = pool.checkout();
 
     assert!(pool.size() > 0);
     assert_eq!(pool.used(), 1);
@@ -94,7 +94,7 @@ fn checkout_does_not_grow_if_free_capacity_remains() {
     assert_eq!(pool.remaining(), 1);
 
     {
-        let c = pool.checkout();
+        let _c = pool.checkout();
         assert_eq!(pool.size(), 1);
         assert_eq!(pool.used(), 1);
         assert_eq!(pool.remaining(), 0);
@@ -105,12 +105,12 @@ fn checkout_does_not_grow_if_free_capacity_remains() {
     assert_eq!(pool.remaining(),1);
 
     // Dropping the checkout will release its capacity.
-    let c = pool.checkout();
+    let _c = pool.checkout();
     assert_eq!(pool.size(), 1);
     assert_eq!(pool.used(), 1);
     assert_eq!(pool.remaining(), 0);
 
-    let c2 = pool.checkout();
+    let _c2 = pool.checkout();
     assert!(pool.size() > 1);
     assert_ne!(pool.used(), 1);;
 

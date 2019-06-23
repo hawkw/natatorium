@@ -97,11 +97,10 @@ where
                         slot,
                         slab: self.slab.clone(),
                     };
+
                     #[cfg(debug_assertions)]
-                    {
-                        checkout.assert_valid();
-                        self.slab.assert_valid();
-                    };
+                    checkout.assert_valid();
+
                     return Some(checkout)
                 }
                 Err(slab::Error::AtCapacity) => return None,
@@ -113,23 +112,8 @@ where
 
     pub fn checkout(&self) -> Owned<T> {
         loop {
-            match self.slab.try_checkout() {
-                Ok(slot) => {
-                    let checkout = Owned {
-                        slot,
-                        slab: self.slab.clone(),
-                    };
-                    #[cfg(debug_assertions)]
-                    {
-                        checkout.assert_valid();
-                        self.slab.assert_valid();
-                    };
-                    return checkout;
-                }
-                Err(slab::Error::AtCapacity) => {
-                    // TODO: Back off, and/or block the thread...
-                }
-                Err(slab::Error::ShouldRetry) => {}
+            if let Some(checkout) = self.try_checkout() {
+                return checkout;
             }
 
             // If the snapshot got stale, or our attempt to grow the slab
@@ -204,6 +188,8 @@ impl<T> Owned<T> {
             slot.ref_count(atomic::Ordering::SeqCst), 1,
             "invariant violated: owned checkout must have exactly one reference"
         );
+        slot.assert_valid();
+        self.slab.assert_valid();
     }
 
 }
