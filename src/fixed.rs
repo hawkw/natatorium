@@ -93,10 +93,16 @@ where
         loop {
             match self.slab.try_checkout() {
                 Ok(slot) => {
-                    return Some(Owned {
+                    let checkout = Owned {
                         slot,
                         slab: self.slab.clone(),
-                    })
+                    };
+                    #[cfg(debug_assertions)]
+                    {
+                        checkout.assert_valid();
+                        self.slab.assert_valid();
+                    };
+                    return Some(checkout)
                 }
                 Err(slab::Error::AtCapacity) => return None,
                 Err(slab::Error::ShouldRetry) => {}
@@ -109,10 +115,16 @@ where
         loop {
             match self.slab.try_checkout() {
                 Ok(slot) => {
-                    return Owned {
+                    let checkout = Owned {
                         slot,
                         slab: self.slab.clone(),
-                    }
+                    };
+                    #[cfg(debug_assertions)]
+                    {
+                        checkout.assert_valid();
+                        self.slab.assert_valid();
+                    };
+                    return checkout;
                 }
                 Err(slab::Error::AtCapacity) => {
                     // TODO: Back off, and/or block the thread...
@@ -181,6 +193,19 @@ impl<T> Owned<T> {
     pub fn detach_with(&mut self, new: impl FnOnce() -> T) -> T {
         unsafe { mem::replace(self.slot.as_mut().item_mut(), new()) }
     }
+
+    /// Asserts that the invariants enforced by the pool are currently valid for
+    /// this `Owned` reference.
+    pub fn assert_valid(&self) {
+        let slot = unsafe {
+            self.slot.as_ref()
+        };
+        assert_eq!(
+            slot.ref_count(atomic::Ordering::SeqCst), 1,
+            "invariant violated: owned checkout must have exactly one reference"
+        );
+    }
+
 }
 
 // === impl Shared ===

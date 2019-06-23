@@ -15,12 +15,40 @@ pub struct Pool<T, N = fn() -> T> {
     inner: Arc<RwLock<Inner<T, N>>>,
 }
 
+/// A uniquely owned checkout of an object in a [growable pool].
+///
+/// An `Owned` checkout allows mutable access to the pooled object, but cannot
+/// be cloned. It may, however, be [downgraded] to a [`Shared`] checkout that
+/// allows shared, immutable acccess.
+///
+/// When an `Owned` checkout is dropped, the underlying object is cleared and
+/// released back to the pool.
+///
+/// [growable pool]: ../struct.Pool.html
+/// [downgraded]: #method.downgrade
+/// [`Shared`]: ../struct.Shared.html
 pub struct Owned<T, N = fn() -> T> {
     item: ptr::NonNull<T>,
     idx: usize,
     slab: Arc<RwLock<Inner<T, N>>>,
 }
 
+
+/// A shared, atomically reference-counted checkout of an object in a [growable pool].
+///
+/// A `Shared` checkout allows shared access to the pooled object for an arbitrary
+/// lifetime, but may not mutate it. If it is the only shared checkout of the
+/// object, it may be [upgraded] back into an [`Iwned`] checkout that allows
+/// exclusive, mutable acccess.
+///
+/// When a `Shared` checkout is cloned, the shared count of the pooled object is
+/// increased by one, and when it is dropped, the shared count is decreased.
+/// If the shared count is 0, the underlying object is cleared and released back
+/// to the pool.
+///
+/// [growable pool]: ../struct.Pool.html
+/// [upgraded]: #method.try_upgrade
+/// [`Owned`]: ../struct.Owned.html
 pub struct Shared<T, N = fn() -> T> {
     item: ptr::NonNull<T>,
     idx: usize,
@@ -113,11 +141,17 @@ where
         let slot = unsafe { slot.as_mut() };
         let idx = slot.index();
         let item = slot.as_ptr();
-        Ok(Owned {
+        let checkout = Owned {
             idx,
             item,
             slab: self.inner.clone(),
-        })
+        };
+        #[cfg(debug_assertions)]
+        {
+            checkout.assert_valid();
+            self.inner.read().expect("pool poisoned").assert_valid();
+        };
+        Ok(checkout)
     }
 
     pub fn checkout(&self) -> Owned<T, N> {
@@ -129,7 +163,7 @@ where
             }
 
             atomic::spin_loop_hint();
-        }
+        };
     }
 }
 
@@ -215,6 +249,19 @@ impl<T, N> Owned<T, N> {
         let new = &mut lock.new;
         let slot = unsafe { self.item.as_mut() };
         mem::replace(slot, new())
+    }
+
+    /// Asserts that the invariants enforced by the pool are currently valid for
+    /// this `Owned` reference.
+    pub fn assert_valid(&self) {
+        assert_eq!(
+            self.read_slab().slot(self.idx).ref_count(atomic::Ordering::SeqCst), 1,
+            "invariant violated: owned checkout must have exactly one reference"
+        );
+    }
+
+    fn read_slab<'a>(&'a self) -> RwLockReadGuard<'a, Inner<T, N>> {
+        self.slab.read().expect("pool poisoned")
     }
 
 }
@@ -306,6 +353,16 @@ where
         };
         let new = &mut self.new;
         self.slab.grow_by(amt, &mut || { Box::new((new)()) });
+    }
+}
+
+impl<T, N> Inner<T, N> {
+    fn assert_valid(&self) {
+        self.slab.assert_valid();
+    }
+
+    fn slot(&self, idx: usize) -> &slab::Slot<Box<T>> {
+        self.slab.slot(idx)
     }
 }
 

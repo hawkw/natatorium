@@ -69,6 +69,38 @@ impl<T> Slab<T> {
     pub fn slot(&self, idx: usize) -> &Slot<T> {
         &self.inner[idx]
     }
+
+    pub fn assert_valid(&self) {
+        let used = self.used.load(Ordering::SeqCst);
+        let mut actual_used = 0;
+        for (idx, slot) in self.inner.iter().enumerate() {
+            assert_eq!(
+                slot.idx, idx,
+                "invariant violated: slot index did not match actual slab index",
+            );
+            if self.head.load(Ordering::SeqCst) == idx {
+                assert_eq!(
+                    slot.ref_count(Ordering::SeqCst), 0,
+                    "invariant violated: head slot had non-zero ref count",
+                );
+            }
+            slot.assert_valid();
+            if slot.ref_count(Ordering::SeqCst) > 0 {
+                actual_used += 1;
+            }
+        }
+        assert!(
+            self.head.load(Ordering::SeqCst) <= self.size(),
+            "invariant violated: free list head should not point past the end of the slab",
+        );
+
+        if used == self.used.load(Ordering::SeqCst) {
+            assert_eq!(
+                used, actual_used,
+                "invariant violated: used did not equal number of slots with non-zero ref counts",
+            );
+        }
+    }
 }
 
 impl<T> Slab<T>
@@ -151,6 +183,10 @@ impl<T> Slot<T> {
         }
     }
 
+    pub fn ref_count(&self, ordering: Ordering) -> usize {
+        self.ref_count.load(ordering)
+    }
+
     #[inline]
     pub fn index(&self) -> usize {
         self.idx
@@ -164,6 +200,14 @@ impl<T> Slot<T> {
     #[inline]
     pub fn item_mut(&mut self) -> &mut T {
         &mut self.item
+    }
+
+    /// Asserts that this slot is currently in a valid state.
+    pub fn assert_valid(&self) {
+        assert_ne!(
+            self.next.load(Ordering::SeqCst), self.idx,
+            "invariant violated: next pointer may not point to self"
+        );
     }
 }
 
