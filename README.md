@@ -4,8 +4,8 @@ Pools for reusing heap-allocated objects.
 
 ## About the Name
 
-"Natatorium" is a fancy Latin word for "swimming pool". There's already a crate
-called `pool`.
+"Natatorium" is a fancy Latin word for "swimming pool". This crate implements
+object pooling, and there's already a crate called `pool`.
 
 ## Comparison with other Crates
 
