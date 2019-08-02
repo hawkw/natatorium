@@ -5,9 +5,12 @@ use crate::{
     traits::Clear,
 };
 
-#[derive(Debug)]
+mod list;
+pub use self::list::List;
+
+// #[derive(Debug)]
 pub struct Slab<T> {
-    inner: Vec<Slot<T>>,
+    inner: List<Slot<T>>,
     head: AtomicUsize,
     used: AtomicUsize,
 }
@@ -30,23 +33,22 @@ pub enum Error {
 impl<T> Slab<T> {
     pub fn new() -> Self {
         Slab {
-            inner: Vec::new(),
+            inner: List::with_capacity(32),
             head: AtomicUsize::new(0),
             used: AtomicUsize::new(0),
         }
     }
 
-    pub fn from_fn(cap: usize, new: &mut impl FnMut() -> T) -> Self {
-        let mut this = Self::new();
+    pub fn from_fn(cap: usize, new: &impl Fn() -> T) -> Self {
+        let this = Self::new();
         this.grow_by(cap, new);
         this
     }
 
-    pub fn grow_by(&mut self, cap: usize, new: &mut impl FnMut() -> T) {
+    pub fn grow_by(&self, cap: usize, new: &impl Fn() -> T) {
         let next = self.inner.len();
 
         // Avoid multiple allocations.
-        self.inner.reserve(cap);
         for i in next..next + cap {
             self.inner.push(Slot::new(new(), i));
         }
@@ -67,40 +69,40 @@ impl<T> Slab<T> {
     }
 
     pub fn slot(&self, idx: usize) -> &Slot<T> {
-        &self.inner[idx]
+        self.inner.get(idx).expect("slot should exist")
     }
 
     pub fn assert_valid(&self) {
         let used = self.used.load(Ordering::SeqCst);
-        let mut actual_used = 0;
-        for (idx, slot) in self.inner.iter().enumerate() {
-            assert_eq!(
-                slot.idx, idx,
-                "invariant violated: slot index did not match actual slab index",
-            );
-            if self.head.load(Ordering::SeqCst) == idx {
-                assert_eq!(
-                    slot.ref_count(Ordering::SeqCst),
-                    0,
-                    "invariant violated: head slot had non-zero ref count",
-                );
-            }
-            slot.assert_valid();
-            if slot.ref_count(Ordering::SeqCst) > 0 {
-                actual_used += 1;
-            }
-        }
+        // let mut actual_used = 0;
+        // for (idx, slot) in self.inner.iter().enumerate() {
+        //     assert_eq!(
+        //         slot.idx, idx,
+        //         "invariant violated: slot index did not match actual slab index",
+        //     );
+        //     if self.head.load(Ordering::SeqCst) == idx {
+        //         assert_eq!(
+        //             slot.ref_count(Ordering::SeqCst),
+        //             0,
+        //             "invariant violated: head slot had non-zero ref count",
+        //         );
+        //     }
+        //     slot.assert_valid();
+        //     if slot.ref_count(Ordering::SeqCst) > 0 {
+        //         actual_used += 1;
+        //     }
+        // }
         assert!(
             self.head.load(Ordering::SeqCst) <= self.size(),
             "invariant violated: free list head should not point past the end of the slab",
         );
 
-        if used == self.used.load(Ordering::SeqCst) {
-            assert_eq!(
-                used, actual_used,
-                "invariant violated: used did not equal number of slots with non-zero ref counts",
-            );
-        }
+        // if used == self.used.load(Ordering::SeqCst) {
+        //     assert_eq!(
+        //         used, actual_used,
+        //         "invariant violated: used did not equal number of slots with non-zero ref counts",
+        //     );
+        // }
     }
 }
 
@@ -126,7 +128,7 @@ where
         }
 
         // If someone else has locked the slot, bail and try again.
-        let slot = &self.inner[idx];
+        let slot = self.inner.get(idx).expect("slot should exist");
         let mut lease = slot.try_acquire()?;
         let next = slot.next();
 

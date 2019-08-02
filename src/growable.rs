@@ -1,7 +1,7 @@
 use crate::{
     builder::{settings, Builder},
     slab::{self, Slab},
-    sync::{atomic, Arc, RwLock, RwLockReadGuard},
+    sync::{atomic, Arc},
     Clear,
 };
 use std::{
@@ -12,7 +12,7 @@ use std::{
 
 #[derive(Clone)]
 pub struct Pool<T, N = fn() -> T> {
-    inner: Arc<RwLock<Inner<T, N>>>,
+    inner: Arc<Inner<T, N>>,
 }
 
 /// A uniquely owned checkout of an object in a [growable pool].
@@ -30,7 +30,7 @@ pub struct Pool<T, N = fn() -> T> {
 pub struct Owned<T, N = fn() -> T> {
     item: ptr::NonNull<T>,
     idx: usize,
-    slab: Arc<RwLock<Inner<T, N>>>,
+    slab: Arc<Inner<T, N>>,
 }
 
 /// A shared, atomically reference-counted checkout of an object in a [growable pool].
@@ -51,7 +51,7 @@ pub struct Owned<T, N = fn() -> T> {
 pub struct Shared<T, N = fn() -> T> {
     item: ptr::NonNull<T>,
     idx: usize,
-    slab: Arc<RwLock<Inner<T, N>>>,
+    slab: Arc<Inner<T, N>>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,27 +94,23 @@ impl<T> Pool<T, ()> {
 }
 
 impl<T, N> Pool<T, N> {
-    fn read<'a>(&'a self) -> RwLockReadGuard<'a, Inner<T, N>> {
-        self.inner.read().expect("pool poisoned")
-    }
-
     pub fn size(&self) -> usize {
-        self.read().slab.size()
+        self.inner.slab.size()
     }
 
     pub fn used(&self) -> usize {
-        self.read().slab.used()
+        self.inner.slab.used()
     }
 
     pub fn remaining(&self) -> usize {
-        self.read().slab.remaining()
+        self.inner.slab.remaining()
     }
 }
 
 impl<T, N> Pool<T, N>
 where
     T: Clear,
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     /// Attempt to check out a pooled resource _without_ growing the slab.
     pub fn try_checkout(&self) -> Option<Owned<T, N>> {
@@ -133,8 +129,6 @@ where
     fn try_checkout2(&self) -> Result<Owned<T, N>, slab::Error> {
         let mut slot = self
             .inner
-            .read()
-            .expect("pool poisoned")
             .slab
             .try_checkout()?;
         let slot = unsafe { slot.as_mut() };
@@ -147,8 +141,8 @@ where
         };
         #[cfg(debug_assertions)]
         {
-            checkout.assert_valid();
-            self.inner.read().expect("pool poisoned").assert_valid();
+            // checkout.assert_valid();
+            self.inner.assert_valid();
         };
         Ok(checkout)
     }
@@ -157,7 +151,7 @@ where
         loop {
             match self.try_checkout2() {
                 Ok(checkout) => return checkout,
-                Err(slab::Error::AtCapacity) => self.inner.write().expect("pool poisoned").grow(),
+                Err(slab::Error::AtCapacity) => self.inner.grow(),
                 Err(slab::Error::ShouldRetry) => {}
             }
 
@@ -168,7 +162,7 @@ where
 
 impl<T, N> From<Builder<Settings, T, N>> for Pool<T, N>
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     fn from(builder: Builder<Settings, T, N>) -> Self {
         builder.finish()
@@ -177,7 +171,7 @@ where
 
 impl<T, N> From<N> for Pool<T, N>
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     fn from(new: N) -> Self {
         Builder::new().growable().with_fn(new).finish()
@@ -222,11 +216,7 @@ impl<T, N> DerefMut for Owned<T, N> {
 
 impl<T, N> Drop for Owned<T, N> {
     fn drop(&mut self) {
-        // if the pool is poisoned, it'll be destroyed anyway, so don't
-        // double panic!
-        if let Ok(inner) = self.slab.read() {
-            inner.slab.slot(self.idx).drop_ref(&inner.slab);
-        }
+        self.slab.slab.slot(self.idx).drop_ref(&self.slab.slab);
     }
 }
 
@@ -241,10 +231,9 @@ impl<T, N> Owned<T, N> {
 
     pub fn detach(&mut self) -> T
     where
-        N: FnMut() -> T,
+        N: Fn() -> T,
     {
-        let mut lock = self.slab.write().expect("pool poisoned");
-        let new = &mut lock.new;
+        let new = &self.slab.new;
         let slot = unsafe { self.item.as_mut() };
         mem::replace(slot, new())
     }
@@ -253,26 +242,19 @@ impl<T, N> Owned<T, N> {
     /// this `Owned` reference.
     pub fn assert_valid(&self) {
         assert_eq!(
-            self.read_slab()
-                .slot(self.idx)
+            self.slab.slab.slot(self.idx)
                 .ref_count(atomic::Ordering::SeqCst),
             1,
             "invariant violated: owned checkout must have exactly one reference"
         );
-    }
-
-    fn read_slab<'a>(&'a self) -> RwLockReadGuard<'a, Inner<T, N>> {
-        self.slab.read().expect("pool poisoned")
     }
 }
 
 // === impl Shared ===
 
 impl<T, N> Shared<T, N> {
-    fn new(item: ptr::NonNull<T>, idx: usize, slab: Arc<RwLock<Inner<T, N>>>) -> Self {
-        slab.read()
-            .expect("pool poisoned")
-            .slab
+    fn new(item: ptr::NonNull<T>, idx: usize, slab: Arc<Inner<T, N>>) -> Self {
+        slab.slab
             .slot(idx)
             .clone_ref();
         Self {
@@ -307,11 +289,7 @@ impl<T, N> Deref for Shared<T, N> {
 
 impl<T, N> Drop for Shared<T, N> {
     fn drop(&mut self) {
-        // if the pool is poisoned, it'll be destroyed anyway, so don't
-        // double panic!
-        if let Ok(inner) = self.slab.read() {
-            inner.slab.slot(self.idx).drop_ref(&inner.slab);
-        }
+        self.slab.slab.slot(self.idx).drop_ref(&self.slab.slab);
     }
 }
 
@@ -327,16 +305,16 @@ impl Default for Settings {
 
 impl<T, N> settings::Make<T, N> for Settings
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     type Pool = Pool<T, N>;
     fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
         Pool {
-            inner: Arc::new(RwLock::new(Inner {
+            inner: Arc::new(Inner {
                 slab: builder.slab(),
                 new: builder.new,
                 settings: builder.settings,
-            })),
+            }),
         }
     }
 }
@@ -345,9 +323,9 @@ where
 
 impl<T, N> Inner<T, N>
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
-    fn grow(&mut self) {
+    fn grow(&self) {
         let amt = match self.settings.growth {
             Growth::Fixed(amt) => amt,
             // If the slab is empty, grow 1 element.
@@ -355,8 +333,8 @@ where
             Growth::Double => self.slab.size(),
             Growth::Half => self.slab.size() / 2,
         };
-        let new = &mut self.new;
-        self.slab.grow_by(amt, &mut || Box::new((new)()));
+        let new = &self.new;
+        self.slab.grow_by(amt, &|| Box::new((new)()));
     }
 }
 

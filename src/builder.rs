@@ -39,7 +39,7 @@ impl<S, T, N> Builder<S, T, N> {
 
     pub fn with_fn<F>(self, new: F) -> Builder<S, T, F>
     where
-        F: FnMut() -> T,
+        F: Fn() -> T,
     {
         Builder {
             new,
@@ -74,12 +74,12 @@ impl<S, T, N> Builder<S, T, N> {
         S::make(self)
     }
 
-    pub(crate) fn slab<I>(&mut self) -> slab::Slab<I>
+    pub(crate) fn slab<I>(&self) -> slab::Slab<I>
     where
-        N: FnMut() -> T,
+        N: Fn() -> T,
         T: Into<I>,
     {
-        slab::Slab::from_fn(self.capacity, &mut || (self.new)().into())
+        slab::Slab::from_fn(self.capacity, &|| (self.new)().into())
     }
 }
 

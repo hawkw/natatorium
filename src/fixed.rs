@@ -11,12 +11,13 @@ use std::{
     ptr,
 };
 
-#[derive(Debug, Clone)]
+// #[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Pool<T> {
     slab: Arc<Slab<T>>,
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct Owned<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
     slab: Arc<Slab<T>>,
@@ -68,7 +69,7 @@ impl<T> Pool<T> {
 
 impl<T, N> From<Builder<Settings, T, N>> for Pool<T>
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     fn from(builder: Builder<Settings, T, N>) -> Self {
         builder.finish()
@@ -77,7 +78,7 @@ where
 
 impl<T, N> From<N> for Pool<T>
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     fn from(new: N) -> Self {
         Self::builder().with_fn(new).fixed().finish()
@@ -244,7 +245,7 @@ impl Default for Settings {
 
 impl<T, N> settings::Make<T, N> for Settings
 where
-    N: FnMut() -> T,
+    N: Fn() -> T,
 {
     type Pool = Pool<T>;
     fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
