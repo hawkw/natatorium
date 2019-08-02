@@ -4,7 +4,7 @@ use natatorium::fixed::Pool;
 
 #[test]
 fn new_checkouts_are_empty() {
-    loom::fuzz(|| {
+    loom::model(|| {
         let pool: Pool<String> = Pool::with_capacity(3);
 
         let p = pool.clone();
@@ -32,7 +32,7 @@ fn new_checkouts_are_empty() {
 
 #[test]
 fn reusing_a_slot_clears_data() {
-    loom::fuzz(|| {
+    loom::model(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
         (0..3)
             .map(|i| {
@@ -70,7 +70,7 @@ fn reusing_a_slot_clears_data() {
 
 #[test]
 fn capacity_released_when_checkout_is_dropped() {
-    loom::fuzz(|| {
+    loom::model(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
 
         let checked_out = Arc::new((Mutex::new(false), Condvar::new()));
@@ -117,7 +117,7 @@ fn capacity_released_when_checkout_is_dropped() {
 
 #[test]
 fn checkout_waits_for_free_capacity() {
-    loom::fuzz(|| {
+    loom::model(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
 
         let p = pool.clone();
@@ -134,7 +134,7 @@ fn checkout_waits_for_free_capacity() {
 
 #[test]
 fn capacity_released_when_all_shared_refs_are_dropped() {
-    loom::fuzz(|| {
+    loom::model(|| {
         let pool: Pool<String> = Pool::with_capacity(1);
 
         let shared1 = pool.checkout().downgrade();
