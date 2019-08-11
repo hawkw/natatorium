@@ -8,6 +8,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::{atomic, Arc},
     ptr,
+    fmt,
 };
 
 #[derive(Clone)]
@@ -67,9 +68,8 @@ pub(crate) enum Growth {
 }
 
 struct Inner<T, N> {
-    slab: Slab<Box<T>>,
+    slab: Slab<T, slab::List<slab::Slot<T>>>,
     new: N,
-    settings: Settings,
 }
 
 // === impl Pool ===
@@ -127,16 +127,14 @@ where
     }
 
     fn try_checkout2(&self) -> Result<Owned<T, N>, slab::Error> {
-        let mut slot = self
+        let slot = self
             .inner
             .slab
             .try_checkout()?;
-        let slot = unsafe { slot.as_mut() };
-        let idx = slot.index();
-        let item = slot.as_ptr();
+        let slot = unsafe { slot.as_ref() };
         let checkout = Owned {
-            idx,
-            item,
+            idx: slot.index(),
+            item: slot.item_ptr(),
             slab: self.inner.clone(),
         };
         #[cfg(debug_assertions)]
@@ -149,7 +147,9 @@ where
 
     pub fn checkout(&self) -> Owned<T, N> {
         loop {
-            match self.try_checkout2() {
+            let ch = self.try_checkout2();
+            // println!("checkout -> {:?}", ch);
+            match ch {
                 Ok(checkout) => return checkout,
                 Err(slab::Error::AtCapacity) => self.inner.grow(),
                 Err(slab::Error::ShouldRetry) => {}
@@ -216,7 +216,7 @@ impl<T, N> DerefMut for Owned<T, N> {
 
 impl<T, N> Drop for Owned<T, N> {
     fn drop(&mut self) {
-        self.slab.slab.slot(self.idx).drop_ref(&self.slab.slab);
+        self.slab.with_slot(self.idx, |s| s.drop_ref(&self.slab.slab));
     }
 }
 
@@ -241,10 +241,10 @@ impl<T, N> Owned<T, N> {
     /// Asserts that the invariants enforced by the pool are currently valid for
     /// this `Owned` reference.
     pub fn assert_valid(&self) {
+        let refs = self.slab.slab.with_slot(self.idx, |slot| slot.ref_count(atomic::Ordering::SeqCst))
+        .unwrap_or_else(|| panic!("invariant violated: checkout referenced slot {:?} which did not exist", self.idx));
         assert_eq!(
-            self.slab.slab.slot(self.idx)
-                .ref_count(atomic::Ordering::SeqCst),
-            1,
+            refs, 1,
             "invariant violated: owned checkout must have exactly one reference"
         );
     }
@@ -254,9 +254,7 @@ impl<T, N> Owned<T, N> {
 
 impl<T, N> Shared<T, N> {
     fn new(item: ptr::NonNull<T>, idx: usize, slab: Arc<Inner<T, N>>) -> Self {
-        slab.slab
-            .slot(idx)
-            .clone_ref();
+        slab.slab.with_slot(idx, |slot| slot.clone_ref());
         Self {
             item,
             slab,
@@ -289,7 +287,7 @@ impl<T, N> Deref for Shared<T, N> {
 
 impl<T, N> Drop for Shared<T, N> {
     fn drop(&mut self) {
-        self.slab.slab.slot(self.idx).drop_ref(&self.slab.slab);
+        self.slab.slab.with_slot(self.idx, |slot| slot.drop_ref(&self.slab.slab));
     }
 }
 
@@ -309,11 +307,22 @@ where
 {
     type Pool = Pool<T, N>;
     fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
+        let capacity = builder.capacity;
+        let mut new = builder.new;
+        let list = if capacity > 0 {
+            let mut i = 0;
+            slab::List::from_fn_with_capacity(capacity, || {
+                let slot = slab::Slot::new(new(), i);
+                i += 1;
+                slot
+            })
+        } else {
+            slab::List::new()
+        };
         Pool {
             inner: Arc::new(Inner {
-                slab: builder.slab(),
-                new: builder.new,
-                settings: builder.settings,
+                slab: slab::Slab::new(list),
+                new,
             }),
         }
     }
@@ -326,15 +335,7 @@ where
     N: Fn() -> T,
 {
     fn grow(&self) {
-        let amt = match self.settings.growth {
-            Growth::Fixed(amt) => amt,
-            // If the slab is empty, grow 1 element.
-            Growth::Double | Growth::Half if self.slab.size() == 0 => 1,
-            Growth::Double => self.slab.size(),
-            Growth::Half => self.slab.size() / 2,
-        };
-        let new = &self.new;
-        self.slab.grow_by(amt, &|| Box::new((new)()));
+        self.slab.extend_with(&self.new);
     }
 }
 
@@ -343,7 +344,14 @@ impl<T, N> Inner<T, N> {
         self.slab.assert_valid();
     }
 
-    fn slot(&self, idx: usize) -> &slab::Slot<Box<T>> {
-        self.slab.slot(idx)
+    fn with_slot<O>(&self, idx: usize, f: impl FnOnce(&slab::Slot<T>) -> O) -> Option<O> {
+        self.slab.with_slot(idx, f)
+    }
+}
+
+
+impl<T, N> fmt::Debug for Owned<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Owned").field("item", &self.item).field("idx", &self.idx).field("inner", &format_args!("<inner>")).finish()
     }
 }

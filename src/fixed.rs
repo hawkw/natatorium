@@ -1,6 +1,6 @@
 use crate::{
     builder::{settings, Builder},
-    slab::{self, Slab},
+    slab::{self, ArraySlab},
     traits::Clear,
 };
 
@@ -14,18 +14,18 @@ use crate::stdlib::{
 // #[derive(Debug, Clone)]
 #[derive(Clone)]
 pub struct Pool<T> {
-    slab: Arc<Slab<T>>,
+    slab: Arc<ArraySlab<T>>,
 }
 
 // #[derive(Debug)]
 pub struct Owned<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
-    slab: Arc<Slab<T>>,
+    slab: Arc<ArraySlab<T>>,
 }
 
 pub struct Shared<T> {
     slot: ptr::NonNull<slab::Slot<T>>,
-    slab: Arc<Slab<T>>,
+    slab: Arc<ArraySlab<T>>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +195,7 @@ impl<T> Owned<T> {
 // === impl Shared ===
 
 impl<T> Shared<T> {
-    fn new(slot: ptr::NonNull<slab::Slot<T>>, slab: Arc<Slab<T>>) -> Self {
+    fn new(slot: ptr::NonNull<slab::Slot<T>>, slab: Arc<slab::ArraySlab<T>>) -> Self {
         unsafe {
             slot.as_ref().clone_ref();
         }
@@ -250,7 +250,7 @@ where
     type Pool = Pool<T>;
     fn make(mut builder: Builder<Self, T, N>) -> Self::Pool {
         Pool {
-            slab: Arc::new(builder.slab()),
+            slab: Arc::new(slab::Slab::new(slab::new_array(builder.capacity, builder.new))),
         }
     }
 }

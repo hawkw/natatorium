@@ -5,7 +5,7 @@ use crate::stdlib::marker::PhantomData;
 pub struct Builder<S, T, N = fn() -> T> {
     pub(crate) new: N,
     pub(crate) settings: S,
-    capacity: usize,
+    pub(crate) capacity: usize,
     item: PhantomData<fn() -> T>,
 }
 
@@ -72,14 +72,6 @@ impl<S, T, N> Builder<S, T, N> {
         S: settings::Make<T, N>,
     {
         S::make(self)
-    }
-
-    pub(crate) fn slab<I>(&self) -> slab::Slab<I>
-    where
-        N: Fn() -> T,
-        T: Into<I>,
-    {
-        slab::Slab::from_fn(self.capacity, &|| (self.new)().into())
     }
 }
 

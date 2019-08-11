@@ -83,7 +83,7 @@ fn checkout_grows_empty_pool() {
 
     assert!(pool.size() > 0);
     assert_eq!(pool.used(), 1);
-    assert_eq!(pool.remaining(), pool.used() - 1);
+    assert_eq!(pool.remaining(), pool.size() - 1);
 }
 
 #[test]

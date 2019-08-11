@@ -3,14 +3,13 @@ use crate::stdlib::ptr;
 
 pub type Stack<T> = List<Option<T>>;
 /// Indexed storage represented by an atomically linked list of chunks.
-pub struct List<T, F = fn() -> T> {
+pub struct List<T> {
     head: AtomicPtr<Block<T>>,
     tail: AtomicPtr<Block<T>>,
     len: AtomicUsize,
-    new: F,
 }
 
-unsafe impl<T: Sync, F: Sync> Sync for List<T, F> {}
+unsafe impl<T: Sync> Sync for List<T> {}
 
 struct Block<T> {
     next_block: AtomicPtr<Block<T>>,
@@ -24,65 +23,74 @@ where
     T: Default,
 {
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::from_fn_with_capacity(T::default, capacity)
+        Self::from_fn_with_capacity(capacity, T::default)
     }
 
-    pub fn new() -> Self {
-        Self::from_fn(T::default)
+    pub fn extend(&self) {
+        let tail = self.tail.load(Ordering::Acquire);
+        if tail.is_null() {
+            self.cons_first(T::default);
+        } else {
+            self.try_cons(tail, T::default);
+        }
     }
 }
 
-impl<T, F> List<T, F> {
+
+impl<T> List<T> {
+
+    const INITIAL_CAPACITY: usize = 8;
+
     // XXX: loom::AtomicPtr::new is not const, so this can't be a const fn in
     // tests currently.
     // Fix this with an upstream PR?
     #[cfg(test)]
-    pub fn from_fn(new: F) -> Self {
+    pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(ptr::null_mut()),
             tail: AtomicPtr::new(ptr::null_mut()),
             len: AtomicUsize::new(0),
-            new,
+
         }
     }
 
     #[cfg(not(test))]
-    pub const fn from_fn(new: F) -> Self {
+    pub const fn new() -> Self {
         Self {
             head: AtomicPtr::new(ptr::null_mut()),
             tail: AtomicPtr::new(ptr::null_mut()),
             len: AtomicUsize::new(0),
-            new,
         }
     }
-}
 
-impl<T, F> List<T, F>
-where
-    F: Fn() -> T,
-{
-
-    const INITIAL_CAPACITY: usize = 8;
-
-    pub fn from_fn_with_capacity(new: F, capacity: usize) -> Self {
+    pub fn from_fn_with_capacity(capacity: usize, new: impl FnMut() -> T) -> Self {
         let capacity = if capacity.is_power_of_two() {
             capacity
         } else {
             capacity.next_power_of_two()
         };
-        let block = Block::with_capacity(capacity, &new);
+        let block = Block::with_capacity(capacity, new);
         let tail = AtomicPtr::new(block);
         let head = AtomicPtr::new(block);
         Self {
             head,
             tail,
             len: AtomicUsize::new(0),
-            new,
+        }
+    }
+
+    pub fn extend_with(&self, f: impl FnMut() -> T) {
+        let tail = self.tail.load(Ordering::Acquire);
+        if tail.is_null() {
+            self.cons_first(f);
+        } else {
+            self.try_cons(tail, f);
         }
     }
 
     pub(crate) fn with_idx<I>(&self, mut i: usize, f: impl FnOnce(*const T) -> I) -> Option<I> {
-        if i > self.len() {
+        // println!("with_idx[{:?}]", i);
+        if i > self.capacity() {
             return None;
         }
 
@@ -92,15 +100,16 @@ where
         // hopping in that case.
         let half_cap = self.tail_capacity();
         if i > half_cap {
-            let tail = unsafe { self.tail().as_ref() }?;
+            let tail = unsafe { self.tail.load(Ordering::Acquire).as_ref() }?;
             debug_assert_eq!(tail.capacity(), half_cap);
 
             return tail.with_idx(i - half_cap, f);
         }
 
-        let mut curr = unsafe { self.head().as_ref() }?;
+        let mut curr = unsafe { self.head.load(Ordering::Acquire).as_ref() }?;
         loop {
-            let len = curr.len();
+            let len = curr.capacity();
+            // println!("with_idx -> [{:?}], block.len={:?}", i, len);
             if i >= len {
                 // The slot's index is higher than this block's length, try the next
                 // block if one exists.
@@ -113,16 +122,23 @@ where
         }
     }
 
-    pub(crate) fn set_last(&self, f: impl FnOnce(&mut T)) -> usize {
+    pub(crate) fn set_last(&self, mut grow: impl FnMut() -> T, f: impl FnOnce(&mut T)) -> usize {
         let mut f = Some(f);
         loop {
-            let tail = self.tail();
-            let block = unsafe  { &*tail };
+            let tail = {
+                let t = self.tail.load(Ordering::Relaxed);
+                if t.is_null() {
+                    self.cons_first(&mut grow)
+                } else {
+                    t
+                }
+            };
+            let block = unsafe { &*tail };
             if block.try_set_last(&mut f) {
                 return self.len.fetch_add(1, Ordering::AcqRel);
             }
 
-            if let Some(new_block) = block.try_cons(tail, self) {
+            if let Some(new_block) = self.try_cons(tail, &mut grow) {
                 if new_block.try_set_last(&mut f) {
                     return self.len.fetch_add(1, Ordering::AcqRel);
                 }
@@ -130,11 +146,6 @@ where
 
             atomic::spin_loop_hint()
         }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -160,38 +171,57 @@ where
         }
     }
 
-    #[inline]
-    fn head(&self) -> *mut Block<T>{
-        let head = self.head.load(Ordering::Acquire);
-        if head.is_null() {
-            self.push_first();
-            self.head.load(Ordering::Acquire)
-        } else {
-            head
-        }
-    }
-
-    #[inline]
-    fn tail(&self) -> *mut Block<T> {
-        let tail = self.tail.load(Ordering::Acquire);
-        if tail.is_null() {
-            self.push_first();
-            self.tail.load(Ordering::Acquire)
-        } else {
-            tail
-        }
-    }
-
     #[cold]
-    fn push_first(&self) {
-        let block = Block::with_capacity(Self::INITIAL_CAPACITY, &self.new);
-        if self.head.compare_and_swap(ptr::null_mut(), block, Ordering::AcqRel).is_null() {
-            self.tail.store(block, Ordering::Release)
+    fn cons_first(&self, new: impl FnMut() -> T) -> *mut Block<T> {
+        let block = Block::with_capacity(Self::INITIAL_CAPACITY, new);
+        let actual = self.head.compare_and_swap(ptr::null_mut(), block, Ordering::AcqRel);
+        if actual.is_null() {
+            debug_assert_eq!(
+                self.tail.compare_and_swap(ptr::null_mut(), block, Ordering::Release),
+                ptr::null_mut(),
+                "invariant violated: head was null but tail was not!",
+            );
+
+            #[cfg(not(debug_assertions))]
+            self.tail.store(block, Ordering::Release);
+            block
         } else {
             unsafe {
                 drop(Box::from_raw(block));
             }
+            actual
         }
+    }
+
+    #[cold]
+    fn try_cons(&self, tail_ptr: *mut Block<T>, new: impl FnMut() -> T) -> Option<&Block<T>> {
+        let tail = unsafe { &*tail_ptr };
+        let next = tail.next_block.load(Ordering::Acquire);
+
+        let block = if !next.is_null() {
+            // Someone else has already pushed a new block, we're done.
+            next
+        } else {
+            debug_assert!(tail.capacity().is_power_of_two());
+            let capacity = tail.capacity() << 1;
+            Block::with_capacity(capacity, new)
+        };
+
+        if self.tail.compare_and_swap(tail_ptr, block, Ordering::AcqRel) == tail_ptr {
+            tail.next_block.store(block, Ordering::Release);
+            return unsafe { block.as_ref() };
+        }
+
+        // Someone beat us to it, and a new block has already been pushed.
+        // We need to clean up the block we allocated.
+        if !block.is_null() {
+            unsafe {
+                // This is safe, since we just created that block; it is our
+                // *responsibility* to destroy it.
+                drop(Box::from_raw(block));
+            };
+        }
+        None
     }
 
     #[inline]
@@ -203,19 +233,25 @@ where
 
 impl<T> List<Option<T>> {
     #[inline]
-    pub fn get<'a>(&'a self, mut i: usize) -> Option<&'a T> {
+    pub fn get<'a>(&'a self, i: usize) -> Option<&'a T> {
         self.with_idx(i, |slot| unsafe { (&*slot).as_ref() })?
     }
 
     #[inline]
     pub fn push(&self, elem: T) -> usize {
-        self.set_last(|slot| {
+        let idx = self.set_last(|| None, |slot| {
             debug_assert!(
                 slot.is_none(),
                 "invariant violated: tried to overwrite existing slot",
             );
             *slot = Some(elem);
-        })
+        });
+        idx
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
     }
 }
 
@@ -226,14 +262,15 @@ impl<T> Block<T> {
     }
 
     fn with_idx<I>(&self, i: usize, f: impl FnOnce(*const T) -> I) -> Option<I> {
-        if i > self.last_idx.load(Ordering::Acquire) {
-            return None;
-        }
+        // if i > self.last_idx.load(Ordering::Acquire) {
+        //     return None;
+        // }
+        // println!("Block::with_index[{:?}]; len={:?}", i, self.block.len());
 
-        Some(self.block[i].with(f))
+        self.block.get(i).map(|s| s.with(f))
     }
 
-    fn with_capacity(capacity: usize, new: &impl Fn() -> T) -> *mut Self {
+    fn with_capacity(capacity: usize, mut new: impl FnMut() -> T) -> *mut Self {
         let mut block = Vec::with_capacity(capacity);
         block.resize_with(capacity, || CausalCell::new(new()));
         let block = block.into_boxed_slice();
@@ -249,6 +286,7 @@ impl<T> Block<T> {
     fn try_set_last(&self, f: &mut Option<impl FnOnce(&mut T)>) -> bool {
         let i = self.push_idx.fetch_add(1, Ordering::AcqRel);
 
+        // println!("try_set_last: last={:?}; len={:?}", i, self.block.len());
         if i >= self.block.len() {
             // We've reached the end of the block; time to push a new block.
             return false;
@@ -262,40 +300,6 @@ impl<T> Block<T> {
 
         self.last_idx.fetch_add(1, Ordering::Release);
         true
-    }
-
-    #[cold]
-    fn try_cons<F>(&self, prev: *mut Self, list: &List<T, F>) -> Option<&Self>
-    where
-        F: Fn() -> T,
-    {
-        let tail = &list.tail;
-        let next = self.next_block.load(Ordering::Acquire);
-
-        let block = if !next.is_null() {
-            // Someone else has already pushed a new block, we're done.
-            next
-        } else {
-            debug_assert!(self.capacity().is_power_of_two());
-            let capacity = self.capacity() << 1;
-            Block::with_capacity(capacity, &list.new)
-        };
-
-        if tail.compare_and_swap(prev, block, Ordering::AcqRel) == prev {
-            self.next_block.store(block, Ordering::Release);
-            return unsafe { block.as_ref() };
-        }
-
-        // Someone beat us to it, and a new block has already been pushed.
-        // We need to clean up the block we allocated.
-        if !block.is_null() {
-            unsafe {
-                // This is safe, since we just created that block; it is our
-                // *responsibility* to destroy it.
-                drop(Box::from_raw(block));
-            };
-        }
-        None
     }
 
     #[inline]
