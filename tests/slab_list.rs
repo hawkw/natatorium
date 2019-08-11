@@ -1,10 +1,10 @@
 use loom::{sync::Arc, thread};
-use natatorium::SlabList;
+use natatorium::SlabStack;
 
 #[test]
 fn push_single_threaded() {
     loom::model(|| {
-        let l: SlabList<usize> = SlabList::with_capacity(8);
+        let l: SlabStack<usize> = SlabStack::with_capacity(8);
         assert_eq!(l.capacity(), 8);
         assert_eq!(l.len(), 0);
 
@@ -37,7 +37,7 @@ fn push_multithreaded() {
     let mut loom = loom::model::Builder::new();
     loom.max_threads = 8;
     loom.check(|| {
-        let l: SlabList<usize> = SlabList::with_capacity(2);
+        let l: SlabStack<usize> = SlabStack::with_capacity(2);
         assert_eq!(l.capacity(), 2);
         assert_eq!(l.len(), 0);
 

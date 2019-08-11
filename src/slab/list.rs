@@ -1,10 +1,10 @@
 use crate::stdlib::sync::{CausalCell, atomic::{self, AtomicPtr, AtomicUsize, Ordering}};
 use crate::stdlib::ptr;
 
-pub type Stack<T> = List<Option<T>, Option::default>;
+pub type Stack<T> = List<Option<T>>;
 /// Indexed storage represented by an atomically linked list of chunks.
 pub struct List<T, F = fn() -> T> {
-    head: Box<Block<T>>,
+    head: AtomicPtr<Block<T>>,
     tail: AtomicPtr<Block<T>>,
     len: AtomicUsize,
     new: F,
@@ -26,24 +26,53 @@ where
     pub fn with_capacity(capacity: usize) -> Self {
         Self::from_fn_with_capacity(T::default, capacity)
     }
+
+    pub fn new() -> Self {
+        Self::from_fn(T::default)
+    }
+}
+
+impl<T, F> List<T, F> {
+    // XXX: loom::AtomicPtr::new is not const, so this can't be a const fn in
+    // tests currently.
+    // Fix this with an upstream PR?
+    #[cfg(test)]
+    pub fn from_fn(new: F) -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            tail: AtomicPtr::new(ptr::null_mut()),
+            len: AtomicUsize::new(0),
+            new,
+        }
+    }
+
+    #[cfg(not(test))]
+    pub const fn from_fn(new: F) -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            tail: AtomicPtr::new(ptr::null_mut()),
+            len: AtomicUsize::new(0),
+            new,
+        }
+    }
 }
 
 impl<T, F> List<T, F>
 where
     F: Fn() -> T,
 {
+
+    const INITIAL_CAPACITY: usize = 8;
+
     pub fn from_fn_with_capacity(new: F, capacity: usize) -> Self {
         let capacity = if capacity.is_power_of_two() {
             capacity
         } else {
             capacity.next_power_of_two()
         };
-        let block = Block::with_capacity(capacity);
+        let block = Block::with_capacity(capacity, &new);
         let tail = AtomicPtr::new(block);
-        let head = unsafe {
-            // this is safe; we just constructed this box...
-            Box::from_raw(block)
-        };
+        let head = AtomicPtr::new(block);
         Self {
             head,
             tail,
@@ -63,29 +92,23 @@ where
         // hopping in that case.
         let half_cap = self.tail_capacity();
         if i > half_cap {
-            let tail = unsafe {
-                // XXX: technically, this is a bad state --- the index is less
-                // than `self.len()`, so we know it exists; it *should* be in the
-                // tail block, but the tail block is null. Should we expect
-                // this to always be `Some`?
-                self.tail.load(Ordering::Acquire).as_ref()?
-            };
+            let tail = unsafe { self.tail().as_ref() }?;
             debug_assert_eq!(tail.capacity(), half_cap);
 
-            tail.with_idx(i - half_cap, f);
-        } else {
-            let mut curr = self.head.as_ref();
-            loop {
-                let len = curr.len();
-                if i >= len {
-                    // The slot's index is higher than this block's length, try the next
-                    // block if one exists.
-                    curr = curr.next()?;
-                    i -= len;
-                } else {
-                    // Found the block with that slot --- see if it's filled?
-                    return curr.with_idx(i, f);
-                }
+            return tail.with_idx(i - half_cap, f);
+        }
+
+        let mut curr = unsafe { self.head().as_ref() }?;
+        loop {
+            let len = curr.len();
+            if i >= len {
+                // The slot's index is higher than this block's length, try the next
+                // block if one exists.
+                curr = curr.next()?;
+                i -= len;
+            } else {
+                // Found the block with that slot --- see if it's filled?
+                return curr.with_idx(i, f);
             }
         }
     }
@@ -93,18 +116,13 @@ where
     pub(crate) fn set_last(&self, f: impl FnOnce(&mut T)) -> usize {
         let mut f = Some(f);
         loop {
-            let tail = self.tail.load(Ordering::Acquire);
-            debug_assert!(
-                !tail.is_null(),
-                "invariant violated: tail should never be null"
-            );
-
-            let block = unsafe { &*tail };
+            let tail = self.tail();
+            let block = unsafe  { &*tail };
             if block.try_set_last(&mut f) {
                 return self.len.fetch_add(1, Ordering::AcqRel);
             }
 
-            if let Some(new_block) = block.try_cons(tail, &self.tail) {
+            if let Some(new_block) = block.try_cons(tail, self) {
                 if new_block.try_set_last(&mut f) {
                     return self.len.fetch_add(1, Ordering::AcqRel);
                 }
@@ -122,8 +140,15 @@ where
     #[inline]
     pub fn capacity(&self) -> usize {
         let tail_cap = self.tail_capacity();
+        let head_cap = if let Some(ref head) = unsafe {
+            self.head.load(Ordering::Relaxed).as_ref()
+        } {
+            head.capacity()
+        } else {
+            return 0;
+        };
 
-        if tail_cap == self.head.as_ref().capacity() {
+        if tail_cap == head_cap {
             // If the tail and head block are the same size, we've not pushed
             // any more blocks, so the tail's capacity is the total capacity.
             tail_cap
@@ -136,13 +161,47 @@ where
     }
 
     #[inline]
+    fn head(&self) -> *mut Block<T>{
+        let head = self.head.load(Ordering::Acquire);
+        if head.is_null() {
+            self.push_first();
+            self.head.load(Ordering::Acquire)
+        } else {
+            head
+        }
+    }
+
+    #[inline]
+    fn tail(&self) -> *mut Block<T> {
+        let tail = self.tail.load(Ordering::Acquire);
+        if tail.is_null() {
+            self.push_first();
+            self.tail.load(Ordering::Acquire)
+        } else {
+            tail
+        }
+    }
+
+    #[cold]
+    fn push_first(&self) {
+        let block = Block::with_capacity(Self::INITIAL_CAPACITY, &self.new);
+        if self.head.compare_and_swap(ptr::null_mut(), block, Ordering::AcqRel).is_null() {
+            self.tail.store(block, Ordering::Release)
+        } else {
+            unsafe {
+                drop(Box::from_raw(block));
+            }
+        }
+    }
+
+    #[inline]
     fn tail_capacity(&self) -> usize {
         let tail = self.tail.load(Ordering::Relaxed);
-        unsafe { tail.as_ref().map(Block::capacity).unwrap_or(0) }
+        unsafe { tail.as_ref() }.map(Block::capacity).unwrap_or(0)
     }
 }
 
-impl<T> Stack<T> {
+impl<T> List<Option<T>> {
     #[inline]
     pub fn get<'a>(&'a self, mut i: usize) -> Option<&'a T> {
         self.with_idx(i, |slot| unsafe { (&*slot).as_ref() })?
@@ -150,12 +209,12 @@ impl<T> Stack<T> {
 
     #[inline]
     pub fn push(&self, elem: T) -> usize {
-        self.set_last(|&mut slot| {
+        self.set_last(|slot| {
             debug_assert!(
                 slot.is_none(),
                 "invariant violated: tried to overwrite existing slot",
             );
-            slot = elem;
+            *slot = Some(elem);
         })
     }
 }
@@ -171,7 +230,7 @@ impl<T> Block<T> {
             return None;
         }
 
-        self.block[i].with(f)
+        Some(self.block[i].with(f))
     }
 
     fn with_capacity(capacity: usize, new: &impl Fn() -> T) -> *mut Self {
@@ -206,7 +265,11 @@ impl<T> Block<T> {
     }
 
     #[cold]
-    fn try_cons(&self, prev: *mut Self, tail: &AtomicPtr<Self>) -> Option<&Self> {
+    fn try_cons<F>(&self, prev: *mut Self, list: &List<T, F>) -> Option<&Self>
+    where
+        F: Fn() -> T,
+    {
+        let tail = &list.tail;
         let next = self.next_block.load(Ordering::Acquire);
 
         let block = if !next.is_null() {
@@ -215,7 +278,7 @@ impl<T> Block<T> {
         } else {
             debug_assert!(self.capacity().is_power_of_two());
             let capacity = self.capacity() << 1;
-            Block::with_capacity(capacity)
+            Block::with_capacity(capacity, &list.new)
         };
 
         if tail.compare_and_swap(prev, block, Ordering::AcqRel) == prev {

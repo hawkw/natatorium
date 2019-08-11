@@ -3,10 +3,10 @@ use crate::stdlib::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::traits::Clearl
+use crate::traits::Clear;
 
 mod list;
-pub use self::list::List;
+pub use self::list::{List, Stack};
 
 // #[derive(Debug)]
 pub struct Slab<T> {
