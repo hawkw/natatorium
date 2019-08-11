@@ -1,5 +1,5 @@
 use crate::{fixed, growable, slab};
-use std::marker::PhantomData;
+use crate::stdlib::marker::PhantomData;
 
 #[derive(Debug, Clone)]
 pub struct Builder<S, T, N = fn() -> T> {

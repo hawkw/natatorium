@@ -6,6 +6,10 @@ edition = "2018"
 
 [dependencies]
 
+[features]
+default = ["std"]
+std = []
+
 [dev-dependencies]
 loom = { version = "0.2", git = "https://github.com/carllerche/loom" }
 criterion = "0.2"

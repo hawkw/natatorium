@@ -1,12 +1,12 @@
 use crate::{
     builder::{settings, Builder},
     slab::{self, Slab},
-    sync::{atomic, Arc},
     Clear,
 };
 use std::{
     mem,
     ops::{Deref, DerefMut},
+    sync::{atomic, Arc},
     ptr,
 };
 

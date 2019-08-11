@@ -1,4 +1,4 @@
-use std::{collections, hash, ops::DerefMut};
+use crate::stdlib::{collections, hash, ops::DerefMut};
 
 pub trait Clear {
     /// Clear all data in `self`, retaining the allocated capacithy.

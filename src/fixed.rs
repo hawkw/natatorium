@@ -1,14 +1,14 @@
 use crate::{
     builder::{settings, Builder},
     slab::{self, Slab},
-    sync::{atomic, Arc},
     traits::Clear,
 };
 
-use std::{
+use crate::stdlib::{
     mem,
     ops::{Deref, DerefMut},
     ptr,
+    sync::{atomic, Arc},
 };
 
 // #[derive(Debug, Clone)]

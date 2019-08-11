@@ -1,6 +1,5 @@
-use crate::sync::{CausalCell, atomic::{self, AtomicPtr, AtomicUsize, Ordering}};
-
-use std::ptr;
+use crate::stdlib::sync::{CausalCell, atomic::{self, AtomicPtr, AtomicUsize, Ordering}};
+use crate::stdlib::ptr;
 
 pub type Stack<T> = List<Option<T>, Option::default>;
 /// Indexed storage represented by an atomically linked list of chunks.

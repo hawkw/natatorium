@@ -10,8 +10,8 @@ use std::{
 
 fn checkout_uncontended(c: &mut Criterion) {
     let bench = criterion::ParameterizedBenchmark::new("natatorium", |b, i| {
+        let pool: fixed::Pool<Vec<i32>> = fixed::Pool::with_capacity(*i);
         b.iter(|| {
-            let pool: fixed::Pool<Vec<i32>> = fixed::Pool::with_capacity(*i);
             (0..*i).map(|_| {
                 let pool = pool.clone();
                 thread::spawn(move || {
@@ -21,10 +21,11 @@ fn checkout_uncontended(c: &mut Criterion) {
             }).for_each(|j| j.join().unwrap())
         })
 
-    }, vec![10, 50, 100, 500]).with_function("pool", |b, i| {
+    }, vec![10, 50, 100, 200]).with_function("pool", |b, i| {
+
+        let pool: pool::Pool<Vec<i32>> = pool::Pool::with_capacity(*i, 0, || Vec::new());
+        let pool = Arc::new(Mutex::new(pool));
         b.iter(|| {
-            let pool: pool::Pool<Vec<i32>> = pool::Pool::with_capacity(*i, 0, || Vec::new());
-            let pool = Arc::new(Mutex::new(pool));
             (0..*i).map(|_| {
                 let pool = pool.clone();
                 thread::spawn(move || {
@@ -39,8 +40,8 @@ fn checkout_uncontended(c: &mut Criterion) {
 
 fn checkout_contended(c: &mut Criterion) {
     let bench = criterion::ParameterizedBenchmark::new("natatorium", |b, i| {
+        let pool: fixed::Pool<Vec<i32>> = fixed::Pool::with_capacity(*i/2);
         b.iter(|| {
-            let pool: fixed::Pool<Vec<i32>> = fixed::Pool::with_capacity(*i/2);
             (0..*i).map(|_| {
                 let pool = pool.clone();
                 thread::spawn(move || {
@@ -50,10 +51,10 @@ fn checkout_contended(c: &mut Criterion) {
             }).for_each(|j| j.join().unwrap())
         })
 
-    }, vec![10, 50, 100, 500,]).with_function("pool", |b, i| {
-        b.iter(|| {
+    }, vec![10, 50, 100, 200]).with_function("pool", |b, i| {
             let pool: pool::Pool<Vec<i32>> = pool::Pool::with_capacity(*i/2, 0, || Vec::new());
             let pool = Arc::new(Mutex::new(pool));
+        b.iter(|| {
             (0..*i).map(|_| {
                 let pool = pool.clone();
                 thread::spawn(move || {
