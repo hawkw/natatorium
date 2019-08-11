@@ -2,26 +2,38 @@ use crate::sync::{CausalCell, atomic::{self, AtomicPtr, AtomicUsize, Ordering}};
 
 use std::ptr;
 
+pub type Stack<T> = List<Option<T>, Option::default>;
 /// Indexed storage represented by an atomically linked list of chunks.
-pub struct List<T> {
+pub struct List<T, F = fn() -> T> {
     head: Box<Block<T>>,
     tail: AtomicPtr<Block<T>>,
     len: AtomicUsize,
+    new: F,
 }
 
-unsafe impl<T: Sync> Sync for List<T> {}
+unsafe impl<T: Sync, F: Sync> Sync for List<T, F> {}
 
 struct Block<T> {
     next_block: AtomicPtr<Block<T>>,
     push_idx: AtomicUsize,
     last_idx: AtomicUsize,
-    block: Box<[Slot<T>]>,
+    block: Box<[CausalCell<T>]>,
 }
 
-type Slot<T> = CausalCell<Option<T>>;
-
-impl<T> List<T> {
+impl<T> List<T>
+where
+    T: Default,
+{
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::from_fn_with_capacity(T::default, capacity)
+    }
+}
+
+impl<T, F> List<T, F>
+where
+    F: Fn() -> T,
+{
+    pub fn from_fn_with_capacity(new: F, capacity: usize) -> Self {
         let capacity = if capacity.is_power_of_two() {
             capacity
         } else {
@@ -37,39 +49,11 @@ impl<T> List<T> {
             head,
             tail,
             len: AtomicUsize::new(0),
+            new,
         }
     }
 
-    pub fn push(&self, elem: T) -> usize {
-        let mut elem = Some(elem);
-        loop {
-            let tail = self.tail.load(Ordering::Acquire);
-            debug_assert!(
-                !tail.is_null(),
-                "invariant violated: tail should never be null"
-            );
-
-            let block = unsafe { &*tail };
-            if block.try_push(&mut elem) {
-                return self.len.fetch_add(1, Ordering::AcqRel);
-            }
-
-            if let Some(new_block) = block.try_cons(tail, &self.tail) {
-                if new_block.try_push(&mut elem) {
-                    return self.len.fetch_add(1, Ordering::AcqRel);
-                }
-            }
-
-            atomic::spin_loop_hint()
-        }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
-    }
-
-    pub fn get<'a>(&'a self, mut i: usize) -> Option<&'a T> {
+    pub(crate) fn with_idx<I>(&self, mut i: usize, f: impl FnOnce(*const T) -> I) -> Option<I> {
         if i > self.len() {
             return None;
         }
@@ -89,28 +73,51 @@ impl<T> List<T> {
             };
             debug_assert_eq!(tail.capacity(), half_cap);
 
-            return tail.get(i - half_cap);
-        }
-
-        let mut curr = self.head.as_ref();
-        loop {
-            let len = curr.len();
-            if i >= len {
-                // The slot's index is higher than this block's length, try the next
-                // block if one exists.
-                curr = curr.next()?;
-                i -= len;
-            } else {
-                // Found the block with that slot --- see if it's filled?
-                return curr.get(i);
+            tail.with_idx(i - half_cap, f);
+        } else {
+            let mut curr = self.head.as_ref();
+            loop {
+                let len = curr.len();
+                if i >= len {
+                    // The slot's index is higher than this block's length, try the next
+                    // block if one exists.
+                    curr = curr.next()?;
+                    i -= len;
+                } else {
+                    // Found the block with that slot --- see if it's filled?
+                    return curr.with_idx(i, f);
+                }
             }
         }
     }
 
+    pub(crate) fn set_last(&self, f: impl FnOnce(&mut T)) -> usize {
+        let mut f = Some(f);
+        loop {
+            let tail = self.tail.load(Ordering::Acquire);
+            debug_assert!(
+                !tail.is_null(),
+                "invariant violated: tail should never be null"
+            );
+
+            let block = unsafe { &*tail };
+            if block.try_set_last(&mut f) {
+                return self.len.fetch_add(1, Ordering::AcqRel);
+            }
+
+            if let Some(new_block) = block.try_cons(tail, &self.tail) {
+                if new_block.try_set_last(&mut f) {
+                    return self.len.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+
+            atomic::spin_loop_hint()
+        }
+    }
+
     #[inline]
-    fn tail_capacity(&self) -> usize {
-        let tail = self.tail.load(Ordering::Relaxed);
-        unsafe { tail.as_ref().map(Block::capacity).unwrap_or(0) }
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -128,6 +135,30 @@ impl<T> List<T> {
             tail_cap << 1
         }
     }
+
+    #[inline]
+    fn tail_capacity(&self) -> usize {
+        let tail = self.tail.load(Ordering::Relaxed);
+        unsafe { tail.as_ref().map(Block::capacity).unwrap_or(0) }
+    }
+}
+
+impl<T> Stack<T> {
+    #[inline]
+    pub fn get<'a>(&'a self, mut i: usize) -> Option<&'a T> {
+        self.with_idx(i, |slot| unsafe { (&*slot).as_ref() })?
+    }
+
+    #[inline]
+    pub fn push(&self, elem: T) -> usize {
+        self.set_last(|&mut slot| {
+            debug_assert!(
+                slot.is_none(),
+                "invariant violated: tried to overwrite existing slot",
+            );
+            slot = elem;
+        })
+    }
 }
 
 impl<T> Block<T> {
@@ -136,18 +167,17 @@ impl<T> Block<T> {
         unsafe { self.next_block.load(Ordering::Acquire).as_ref() }
     }
 
-    #[inline]
-    fn get<'a>(&'a self, i: usize) -> Option<&'a T> {
+    fn with_idx<I>(&self, i: usize, f: impl FnOnce(*const T) -> I) -> Option<I> {
         if i > self.last_idx.load(Ordering::Acquire) {
             return None;
         }
 
-        self.block[i].with(|slot| unsafe { (&*slot).as_ref() })
+        self.block[i].with(f)
     }
 
-    fn with_capacity(capacity: usize) -> *mut Self {
+    fn with_capacity(capacity: usize, new: &impl Fn() -> T) -> *mut Self {
         let mut block = Vec::with_capacity(capacity);
-        block.resize_with(capacity, || CausalCell::new(None));
+        block.resize_with(capacity, || CausalCell::new(new()));
         let block = block.into_boxed_slice();
         let block = Block {
             next_block: AtomicPtr::new(ptr::null_mut()),
@@ -158,7 +188,7 @@ impl<T> Block<T> {
         Box::into_raw(Box::new(block))
     }
 
-    fn try_push(&self, elem: &mut Option<T>) -> bool {
+    fn try_set_last(&self, f: &mut Option<impl FnOnce(&mut T)>) -> bool {
         let i = self.push_idx.fetch_add(1, Ordering::AcqRel);
 
         if i >= self.block.len() {
@@ -168,15 +198,8 @@ impl<T> Block<T> {
 
         self.block[i].with_mut(|slot| {
             let slot = unsafe { &mut *slot };
-            debug_assert!(
-                slot.is_none(),
-                "invariant violated: tried to overwrite existing slot ({:?})",
-                i
-            );
-
-            let elem = elem.take();
-            debug_assert!(elem.is_some(), "invariant violated: tried to push nothing");
-            *slot = elem;
+            let f = f.take().expect("tried to set last item twice");
+            f(slot);
         });
 
         self.last_idx.fetch_add(1, Ordering::Release);
