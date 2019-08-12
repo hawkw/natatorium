@@ -18,3 +18,12 @@ pool = "0.1"
 [[bench]]
 name = "fixed"
 harness = false
+
+[[bench]]
+name = "vs_alloc"
+harness = false
+
+
+[[bench]]
+name = "checkout"
+harness = false
